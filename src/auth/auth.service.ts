@@ -78,7 +78,20 @@ export class AuthService {
     }
     return {
       ...this.sanitizeUser(user),
+      avatar: user.avatar,
       createdAt: user.createdAt,
+    };
+  }
+
+  /**
+   * Được gọi sau khi Google OAuth xác thực thành công.
+   * req.user đã chứa User entity từ GoogleStrategy.validate()
+   */
+  async googleLogin(user: User) {
+    return {
+      message: 'Đăng nhập Google thành công',
+      user: this.sanitizeUser(user),
+      access_token: this.generateToken(user),
     };
   }
 
@@ -88,6 +101,7 @@ export class AuthService {
       id: user._id.toString(),
       email: user.email,
       fullName: user.fullName,
+      avatar: user.avatar ?? null,
       role: user.role,
       isActive: user.isActive,
     };
@@ -102,3 +116,4 @@ export class AuthService {
     return this.jwtService.sign(payload);
   }
 }
+

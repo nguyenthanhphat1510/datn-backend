@@ -7,14 +7,6 @@ import {
 } from 'typeorm';
 import { ObjectId } from 'mongodb';
 
-export enum ProductCategory {
-  THUOC_BVTV = 'thuoc_bvtv',       // Thuốc bảo vệ thực vật
-  PHAN_BON = 'phan_bon',           // Phân bón
-  GIONG = 'giong',                 // Giống cây trồng
-  CONG_CU = 'cong_cu',             // Công cụ nông nghiệp
-  KHAC = 'khac',                   // Khác
-}
-
 @Entity('products')
 export class Product {
   @ObjectIdColumn()
@@ -32,12 +24,9 @@ export class Product {
   @Column({ type: 'int', default: 0 })
   stock: number;
 
-  @Column({
-    type: 'enum',
-    enum: ProductCategory,
-    default: ProductCategory.KHAC,
-  })
-  category: ProductCategory;
+  // Ref đến _id của Category (lưu dạng string để DTO dễ validate qua @IsMongoId)
+  @Column()
+  categoryId: string;
 
   @Column({ nullable: true })
   manufacturer: string; // Nhà sản xuất / thương hiệu
@@ -45,9 +34,9 @@ export class Product {
   @Column({ nullable: true })
   usageInstructions: string; // Hướng dẫn sử dụng
 
-  // Trường image_url để sau tích hợp Cloudinary
-  @Column({ nullable: true })
-  imageUrl: string;
+  // Danh sách ảnh sản phẩm lưu trên Cloudinary
+  @Column({ type: 'array', default: [] })
+  images: { url: string; publicId: string }[];
 
   @Column({ default: true })
   isActive: boolean;

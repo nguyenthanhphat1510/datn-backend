@@ -6,12 +6,13 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { MongoRepository } from 'typeorm';
 import { ObjectId } from 'mongodb';
-import { Product, ProductCategory } from './entities/product.entity';
+import { Product } from './entities/product.entity';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
 
 export interface ProductFilter {
-  category?: ProductCategory;
+  categoryId?: string;
   isActive?: boolean;
   search?: string;       // Tìm theo tên
   minPrice?: number;
@@ -28,11 +29,17 @@ export class ProductsService {
   constructor(
     @InjectRepository(Product)
     private productsRepository: MongoRepository<Product>,
+    private readonly cloudinaryService: CloudinaryService,
   ) {}
 
   /** Tạo sản phẩm mới */
   async create(createProductDto: CreateProductDto): Promise<Product> {
-    const product = this.productsRepository.create(createProductDto);
+    // TypeORM Mongo không áp @Column default cho field bị undefined → set explicit
+    const product = this.productsRepository.create({
+      ...createProductDto,
+      isActive: createProductDto.isActive ?? true,
+    });
+    product.images = [];
     return this.productsRepository.save(product);
   }
 
@@ -41,7 +48,7 @@ export class ProductsService {
     filter: ProductFilter = {},
     pagination: PaginationOptions = {},
   ): Promise<{ data: Product[]; total: number; page: number; limit: number }> {
-    const { category, isActive, search, minPrice, maxPrice } = filter;
+    const { categoryId, isActive, search, minPrice, maxPrice } = filter;
     const page = Math.max(1, pagination.page ?? 1);
     const limit = Math.min(100, Math.max(1, pagination.limit ?? 10));
     const skip = (page - 1) * limit;
@@ -49,8 +56,8 @@ export class ProductsService {
     // Build where condition
     const where: Record<string, any> = {};
 
-    if (category) {
-      where.category = category;
+    if (categoryId) {
+      where.categoryId = categoryId;
     }
 
     if (isActive !== undefined) {
@@ -110,9 +117,14 @@ export class ProductsService {
     return { message: 'Đã ẩn sản phẩm thành công' };
   }
 
-  /** Xóa cứng khỏi DB (chỉ dùng khi cần) */
+  /** Xóa cứng khỏi DB (chỉ dùng khi cần) — cleanup luôn ảnh trên Cloudinary */
   async remove(id: string): Promise<{ message: string }> {
     const product = await this.findOne(id);
+    if (product.images?.length) {
+      await Promise.all(
+        product.images.map((img) => this.cloudinaryService.deleteImage(img.publicId)),
+      );
+    }
     await this.productsRepository.remove(product);
     return { message: 'Đã xóa sản phẩm thành công' };
   }
@@ -132,6 +144,31 @@ export class ProductsService {
       throw new BadRequestException('Tồn kho không đủ');
     }
     product.stock = newStock;
+    return this.productsRepository.save(product);
+  }
+
+  /** Upload thêm 1 hoặc nhiều ảnh cho sản phẩm */
+  async addImages(id: string, files: Express.Multer.File[]): Promise<Product> {
+    if (!files?.length) {
+      throw new BadRequestException('Chưa có file nào được upload');
+    }
+    const product = await this.findOne(id);
+    const uploaded = await Promise.all(
+      files.map((f) => this.cloudinaryService.uploadImage(f)),
+    );
+    product.images = [...(product.images ?? []), ...uploaded];
+    return this.productsRepository.save(product);
+  }
+
+  /** Xóa 1 ảnh khỏi sản phẩm (và khỏi Cloudinary) */
+  async removeImage(id: string, publicId: string): Promise<Product> {
+    const product = await this.findOne(id);
+    const existed = product.images?.some((img) => img.publicId === publicId);
+    if (!existed) {
+      throw new NotFoundException(`Không tìm thấy ảnh với publicId: ${publicId}`);
+    }
+    await this.cloudinaryService.deleteImage(publicId);
+    product.images = product.images.filter((img) => img.publicId !== publicId);
     return this.productsRepository.save(product);
   }
 }

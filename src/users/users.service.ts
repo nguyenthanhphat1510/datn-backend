@@ -71,4 +71,37 @@ export class UsersService {
 
     await this.usersRepository.remove(user);
   }
+
+  async findByGoogleId(googleId: string): Promise<User | null> {
+    return this.usersRepository.findOne({ where: { googleId } });
+  }
+
+  async findOrCreateGoogleUser(data: {
+    googleId: string;
+    email: string;
+    fullName: string;
+    avatar: string;
+  }): Promise<User> {
+    // Bước 1: Tìm theo googleId
+    let user = await this.findByGoogleId(data.googleId);
+    if (user) return user;
+
+    // Bước 2: Email đã tồn tại (user đăng ký bằng password trước) → liên kết
+    user = await this.findByEmail(data.email);
+    if (user) {
+      user.googleId = data.googleId;
+      user.avatar = data.avatar;
+      return this.usersRepository.save(user);
+    }
+
+    // Bước 3: Tạo user mới hoàn toàn từ Google
+    const newUser = this.usersRepository.create({
+      googleId: data.googleId,
+      email: data.email.toLowerCase(),
+      fullName: data.fullName,
+      avatar: data.avatar,
+      isActive: true,
+    } as Partial<User>);
+    return this.usersRepository.save(newUser);
+  }
 }

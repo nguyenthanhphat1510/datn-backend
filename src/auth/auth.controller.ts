@@ -6,7 +6,10 @@ import {
   HttpCode,
   HttpStatus,
   UseGuards,
+  Req,
+  Res,
 } from '@nestjs/common';
+import type { Request, Response } from 'express';
 import {
   ApiTags,
   ApiOperation,
@@ -20,6 +23,7 @@ import { LoginDto } from './dto/login.dto';
 import { Public } from './decorators/public.decorator';
 import { CurrentUser } from './decorators/current-user.decorator';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { GoogleAuthGuard } from './guards/google-auth.guard';
 
 @ApiTags('Auth')
 @Controller('auth')
@@ -114,5 +118,41 @@ export class AuthController {
   @ApiResponse({ status: 401, description: 'Không có hoặc token không hợp lệ' })
   async getProfile(@CurrentUser() user: { userId: string }) {
     return this.authService.getProfile(user.userId);
+  }
+
+  // ────────────────────────────────────────────────────────────
+  //  GOOGLE OAUTH
+  // ────────────────────────────────────────────────────────────
+
+  /**
+   * GET /auth/google
+   * Bước 1: Passport tự redirect user sang trang đăng nhập Google.
+   * Không cần viết logic ở đây.
+   */
+  @Public()
+  @Get('google')
+  @UseGuards(GoogleAuthGuard)
+  @ApiOperation({ summary: 'Khởi tạo đăng nhập bằng Google (redirect đến Google)' })
+  async googleAuth() {
+    // Passport xử lý redirect — body này không bao giờ chạy
+  }
+
+  /**
+   * GET /auth/google/callback
+   * Bước 2: Google gọi về đây sau khi user đồng ý.
+   * Passport xác thực, GoogleStrategy.validate() chạy → req.user = User entity.
+   * Ta tạo JWT và redirect về frontend kèm token.
+   */
+  @Public()
+  @Get('google/callback')
+  @UseGuards(GoogleAuthGuard)
+  @ApiOperation({ summary: 'Google OAuth2 callback — trả JWT về frontend' })
+  async googleAuthCallback(@Req() req: Request, @Res() res: Response) {
+    const result = await this.authService.googleLogin(req.user as any);
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
+    // Redirect về trang callback của frontend kèm JWT token
+    return res.redirect(
+      `${frontendUrl}/auth/callback?token=${result.access_token}`,
+    );
   }
 }

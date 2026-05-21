@@ -3,14 +3,12 @@ import {
   IsNotEmpty,
   IsNumber,
   IsInt,
-  IsEnum,
   IsOptional,
   IsBoolean,
-  IsUrl,
+  IsMongoId,
   Min,
   MaxLength,
 } from 'class-validator';
-import { ProductCategory } from '../entities/product.entity';
 
 export class CreateProductDto {
   @IsString()
@@ -30,8 +28,11 @@ export class CreateProductDto {
   @Min(0, { message: 'Tồn kho không được âm' })
   stock: number;
 
-  @IsEnum(ProductCategory, { message: 'Danh mục không hợp lệ' })
-  category: ProductCategory;
+  // Ref đến Category._id (chuỗi ObjectId hợp lệ)
+  @IsString()
+  @IsNotEmpty({ message: 'Hãy chọn danh mục' })
+  @IsMongoId({ message: 'categoryId không hợp lệ' })
+  categoryId: string;
 
   @IsOptional()
   @IsString()
@@ -41,10 +42,7 @@ export class CreateProductDto {
   @IsString()
   usageInstructions?: string;
 
-  // Để sau tích hợp Cloudinary
-  @IsOptional()
-  @IsUrl({}, { message: 'imageUrl phải là URL hợp lệ' })
-  imageUrl?: string;
+  // Ảnh sản phẩm upload qua endpoint POST /products/:id/images sau khi tạo
 
   @IsOptional()
   @IsBoolean()

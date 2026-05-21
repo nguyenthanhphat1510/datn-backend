@@ -20,8 +20,14 @@ export class User {
   @Column({ unique: true })
   email: string;
 
-  @Column()
+  @Column({ nullable: true })
   password: string;
+
+  @Column({ nullable: true, unique: true })
+  googleId: string; // ID từ Google, dùng để nhận diện tài khoản Google
+
+  @Column({ nullable: true })
+  avatar: string; // URL ảnh đại diện từ Google
 
   @Column({ nullable: true })
   fullName: string;

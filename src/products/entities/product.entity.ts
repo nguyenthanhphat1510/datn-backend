@@ -28,8 +28,9 @@ export class Product {
   @Column()
   categoryId: string;
 
+  // Ref đến Manufacturer._id (lưu dạng string giống categoryId)
   @Column({ nullable: true })
-  manufacturer: string; // Nhà sản xuất / thương hiệu
+  manufacturer: string;
 
   @Column({ nullable: true })
   usageInstructions: string; // Hướng dẫn sử dụng

@@ -34,8 +34,9 @@ export class CreateProductDto {
   @IsMongoId({ message: 'categoryId không hợp lệ' })
   categoryId: string;
 
+  // Ref đến Manufacturer._id (chuỗi ObjectId hợp lệ)
   @IsOptional()
-  @IsString()
+  @IsMongoId({ message: 'manufacturer không hợp lệ' })
   manufacturer?: string;
 
   @IsOptional()

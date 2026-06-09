@@ -9,7 +9,10 @@ import { UsersModule } from './users/users.module';
 import { ProductsModule } from './products/products.module';
 import { CategoriesModule } from './categories/categories.module';
 import { CartModule } from './cart/cart.module';
+import { OrdersModule } from './orders/orders.module';
+import { AddressesModule } from './addresses/addresses.module';
 import { SubcategoriesModule } from './subcategories/subcategories.module';
+import { ManufacturersModule } from './manufacturers/manufacturers.module';
 import { CloudinaryModule } from './cloudinary/cloudinary.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { RolesGuard } from './auth/guards/roles.guard';
@@ -18,6 +21,9 @@ import { Product } from './products/entities/product.entity';
 import { Category } from './categories/entities/category.entity';
 import { Cart } from './cart/entities/cart.entity';
 import { Subcategory } from './subcategories/entities/subcategory.entity';
+import { Manufacturer } from './manufacturers/entities/manufacturer.entity';
+import { Order } from './orders/entities/order.entity';
+import { Address } from './addresses/entities/address.entity';
 
 @Module({
   imports: [
@@ -32,7 +38,16 @@ import { Subcategory } from './subcategories/entities/subcategory.entity';
       useFactory: (configService: ConfigService) => ({
         type: 'mongodb',
         url: configService.get<string>('MONGODB_URI'),
-        entities: [User, Product, Category, Cart, Subcategory],
+        entities: [
+          User,
+          Product,
+          Category,
+          Cart,
+          Subcategory,
+          Manufacturer,
+          Order,
+          Address,
+        ],
         synchronize: true,          // Tự tạo collection. Tắt trong production!
         useUnifiedTopology: true,
       }),
@@ -44,7 +59,10 @@ import { Subcategory } from './subcategories/entities/subcategory.entity';
     ProductsModule,
     CategoriesModule,
     CartModule,
+    OrdersModule,
+    AddressesModule,
     SubcategoriesModule,
+    ManufacturersModule,
   ],
   controllers: [AppController],
   providers: [

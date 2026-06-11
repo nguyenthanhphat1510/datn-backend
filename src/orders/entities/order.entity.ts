@@ -32,9 +32,7 @@ export interface OrderItem {
 export interface ShippingAddress {
   fullName: string;
   phone: string;
-  province: string; // Tỉnh/Thành phố
-  ward: string; // Phường/Xã
-  street: string; // Số nhà, tên đường
+  address: string; // Địa chỉ đầy đủ (1 chuỗi gộp, lấy từ gogoduk hoặc nhập tay)
 }
 
 @Entity('orders')

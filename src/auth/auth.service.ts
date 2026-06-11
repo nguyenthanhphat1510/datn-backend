@@ -30,11 +30,13 @@ export class AuthService {
     // Hash password với bcrypt (salt rounds = 10)
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Tạo user mới
+    // Tạo user mới. Set isActive=true rõ ràng vì MongoDB không áp default của
+    // TypeORM khi insert → nếu thiếu, JwtStrategy.validate sẽ coi như bị khóa.
     const user = await this.usersService.create({
       email: email.toLowerCase(),
       password: hashedPassword,
       fullName,
+      isActive: true,
     });
 
     return {

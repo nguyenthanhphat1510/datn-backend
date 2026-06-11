@@ -11,6 +11,7 @@ import { CategoriesModule } from './categories/categories.module';
 import { CartModule } from './cart/cart.module';
 import { OrdersModule } from './orders/orders.module';
 import { AddressesModule } from './addresses/addresses.module';
+import { AddressSuggestModule } from './address-suggest/address-suggest.module';
 import { SubcategoriesModule } from './subcategories/subcategories.module';
 import { ManufacturersModule } from './manufacturers/manufacturers.module';
 import { CloudinaryModule } from './cloudinary/cloudinary.module';
@@ -61,6 +62,7 @@ import { Address } from './addresses/entities/address.entity';
     CartModule,
     OrdersModule,
     AddressesModule,
+    AddressSuggestModule,
     SubcategoriesModule,
     ManufacturersModule,
   ],

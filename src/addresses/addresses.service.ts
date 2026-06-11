@@ -46,9 +46,7 @@ export class AddressesService {
       userId,
       fullName: dto.fullName,
       phone: dto.phone,
-      province: dto.province,
-      ward: dto.ward,
-      street: dto.street,
+      address: dto.address,
       isDefault: makeDefault,
     });
     return this.addressesRepository.save(address);

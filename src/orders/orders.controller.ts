@@ -1,6 +1,6 @@
 // src/orders/orders.controller.ts
 
-import { Controller, Post, Body } from '@nestjs/common';
+import { Controller, Post, Get, Body } from '@nestjs/common';
 import { OrdersService } from './orders.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -21,5 +21,14 @@ export class OrdersController {
     @Body() createOrderDto: CreateOrderDto,
   ) {
     return this.ordersService.createOrder(user.userId, createOrderDto);
+  }
+
+  /**
+   * GET /orders
+   * Danh sách đơn hàng của user hiện tại (mới nhất lên đầu).
+   */
+  @Get()
+  findMyOrders(@CurrentUser() user: { userId: string }) {
+    return this.ordersService.findAllByUser(user.userId);
   }
 }

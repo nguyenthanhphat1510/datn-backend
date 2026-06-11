@@ -23,13 +23,7 @@ export class Address {
   phone: string; // SĐT người nhận
 
   @Column()
-  province: string; // Tỉnh/Thành phố
-
-  @Column()
-  ward: string; // Phường/Xã
-
-  @Column()
-  street: string; // Số nhà, tên đường
+  address: string; // Địa chỉ đầy đủ (1 chuỗi gộp, lấy từ gogoduk hoặc nhập tay)
 
   // Mỗi user chỉ nên có đúng 1 địa chỉ isDefault=true (đảm bảo bởi service)
   @Column({ default: false })

@@ -23,7 +23,9 @@ export class User {
   @Column({ nullable: true })
   password: string;
 
-  @Column({ nullable: true, unique: true })
+  // KHÔNG unique index: user đăng ký bằng email có googleId=null, nhiều null
+  // sẽ trùng key. Việc chống trùng googleId do findOrCreateGoogleUser lo ở code.
+  @Column({ nullable: true })
   googleId: string; // ID từ Google, dùng để nhận diện tài khoản Google
 
   @Column({ nullable: true })

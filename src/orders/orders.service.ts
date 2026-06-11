@@ -42,9 +42,7 @@ export class OrdersService {
       return {
         fullName: addr.fullName,
         phone: addr.phone,
-        province: addr.province,
-        ward: addr.ward,
-        street: addr.street,
+        address: addr.address,
       };
     }
 
@@ -133,5 +131,13 @@ export class OrdersService {
     await this.cartService.clearCart(userId);
 
     return savedOrder;
+  }
+
+  /** GET /orders — danh sách đơn của user, mới nhất lên đầu. */
+  async findAllByUser(userId: string): Promise<Order[]> {
+    return this.ordersRepository.find({
+      where: { userId },
+      order: { createdAt: 'DESC' } as any,
+    });
   }
 }

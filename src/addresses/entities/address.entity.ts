@@ -25,6 +25,14 @@ export class Address {
   @Column()
   address: string; // Địa chỉ đầy đủ (1 chuỗi gộp, lấy từ gogoduk hoặc nhập tay)
 
+  // Toạ độ (resolve từ gogoduk) — dùng tính phí ship theo khoảng cách.
+  // Nullable: địa chỉ cũ/nhập tay không qua resolve sẽ không có.
+  @Column({ nullable: true })
+  lat?: number;
+
+  @Column({ nullable: true })
+  lon?: number;
+
   // Mỗi user chỉ nên có đúng 1 địa chỉ isDefault=true (đảm bảo bởi service)
   @Column({ default: false })
   isDefault: boolean;

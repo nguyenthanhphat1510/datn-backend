@@ -5,6 +5,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsMongoId,
+  IsNumber,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -22,6 +23,14 @@ export class ShippingAddressDto {
   @IsString()
   @IsNotEmpty({ message: 'Địa chỉ không được để trống' })
   address: string;
+
+  @IsNumber()
+  @IsOptional()
+  lat?: number; // Toạ độ resolve từ gogoduk — để tính phí ship
+
+  @IsNumber()
+  @IsOptional()
+  lon?: number;
 }
 
 export class CreateOrderDto {

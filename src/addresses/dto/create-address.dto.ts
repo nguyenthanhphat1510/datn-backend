@@ -1,4 +1,10 @@
-import { IsString, IsNotEmpty, IsBoolean, IsOptional } from 'class-validator';
+import {
+  IsString,
+  IsNotEmpty,
+  IsBoolean,
+  IsOptional,
+  IsNumber,
+} from 'class-validator';
 
 export class CreateAddressDto {
   @IsString()
@@ -12,6 +18,14 @@ export class CreateAddressDto {
   @IsString()
   @IsNotEmpty({ message: 'Địa chỉ không được để trống' })
   address: string;
+
+  @IsNumber()
+  @IsOptional()
+  lat?: number; // Toạ độ (resolve từ gogoduk) — để tính phí ship theo khoảng cách
+
+  @IsNumber()
+  @IsOptional()
+  lon?: number;
 
   @IsBoolean()
   @IsOptional()

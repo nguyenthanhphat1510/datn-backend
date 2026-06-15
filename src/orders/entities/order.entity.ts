@@ -33,6 +33,8 @@ export interface ShippingAddress {
   fullName: string;
   phone: string;
   address: string; // Địa chỉ đầy đủ (1 chuỗi gộp, lấy từ gogoduk hoặc nhập tay)
+  lat?: number; // Toạ độ (resolve từ gogoduk) — dùng tính phí ship
+  lon?: number;
 }
 
 @Entity('orders')
@@ -47,8 +49,11 @@ export class Order {
   @Column({ type: 'json' })
   items: OrderItem[]; // Snapshot của giỏ hàng tại thời điểm checkout
 
+  @Column({ type: 'double', default: 0 })
+  shippingFee: number; // Phí vận chuyển — chốt server-side theo khoảng cách
+
   @Column({ type: 'double' })
-  total: number; // Tổng tiền — tính sẵn để query dễ
+  total: number; // Tổng tiền (hàng + ship) — tính sẵn để query dễ
 
   @Column({
     type: 'enum',

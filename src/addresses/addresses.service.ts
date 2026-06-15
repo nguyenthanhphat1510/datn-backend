@@ -47,6 +47,8 @@ export class AddressesService {
       fullName: dto.fullName,
       phone: dto.phone,
       address: dto.address,
+      lat: dto.lat,
+      lon: dto.lon,
       isDefault: makeDefault,
     });
     return this.addressesRepository.save(address);

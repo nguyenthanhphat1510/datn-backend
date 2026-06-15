@@ -15,4 +15,14 @@ export class AddressSuggestController {
   suggest(@Query('input') input: string) {
     return this.service.suggest(input);
   }
+
+  /**
+   * GET /api/address-suggest/resolve?id=...
+   * Lấy địa chỉ chi tiết (lat/lon/quận/thành phố) từ placeId. Public.
+   */
+  @Public()
+  @Get('resolve')
+  resolve(@Query('id') id: string) {
+    return this.service.resolve(id);
+  }
 }

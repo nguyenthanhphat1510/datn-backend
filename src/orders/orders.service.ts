@@ -13,6 +13,7 @@ import { CreateOrderDto } from './dto/create-order.dto';
 import { CartService } from '../cart/cart.service';
 import { ProductsService } from '../products/products.service';
 import { AddressesService } from '../addresses/addresses.service';
+import { calcShippingFee } from '../common/shipping';
 
 @Injectable()
 export class OrdersService {
@@ -43,6 +44,8 @@ export class OrdersService {
         fullName: addr.fullName,
         phone: addr.phone,
         address: addr.address,
+        lat: addr.lat,
+        lon: addr.lon,
       };
     }
 
@@ -113,12 +116,20 @@ export class OrdersService {
       await this.productsService.updateStock(item.productId, -item.quantity);
     }
 
-    // ── BƯỚC 5: Tính tổng và tạo Order ────────────────────────────────────
-    const total = orderItems.reduce((sum, item) => sum + item.subtotal, 0);
+    // ── BƯỚC 5: Tính tổng (hàng + ship) và tạo Order ──────────────────────
+    const subtotal = orderItems.reduce((sum, item) => sum + item.subtotal, 0);
+    // Chốt phí ship server-side theo toạ độ — không tin số từ client.
+    const { fee: shippingFee } = calcShippingFee(
+      subtotal,
+      shippingAddress.lat,
+      shippingAddress.lon,
+    );
+    const total = subtotal + shippingFee;
 
     const order = this.ordersRepository.create({
       userId,
       items: orderItems,
+      shippingFee,
       total,
       status: OrderStatus.PENDING,
       shippingAddress, // đã resolve ở BƯỚC 0 (từ sổ hoặc nhập tay)

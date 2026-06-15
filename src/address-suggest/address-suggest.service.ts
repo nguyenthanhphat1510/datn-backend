@@ -15,6 +15,18 @@ export interface SuggestResult {
   predictions: AddressPrediction[];
 }
 
+// Địa chỉ chi tiết trả về từ gogoduk /v1/place/resolve.
+export interface PlaceDetail {
+  placeId: string;
+  name: string;
+  address: string;
+  lat: number;
+  lon: number;
+  district: string;
+  city: string;
+  country: string;
+}
+
 @Injectable()
 export class AddressSuggestService {
   private readonly logger = new Logger(AddressSuggestService.name);
@@ -56,6 +68,44 @@ export class AddressSuggestService {
         `Gọi gogoduk thất bại: ${err instanceof Error ? err.message : err}`,
       );
       return { predictions: [] };
+    }
+  }
+
+  /**
+   * Proxy gọi gogoduk /v1/place/resolve — lấy địa chỉ chi tiết (lat/lon/quận/thành phố)
+   * từ placeId của một gợi ý. Giữ API key ở server.
+   * Trả về null nếu thiếu config / placeId rỗng / upstream lỗi.
+   */
+  async resolve(placeId: string): Promise<PlaceDetail | null> {
+    const id = (placeId ?? '').trim();
+    if (!id) {
+      return null;
+    }
+
+    const baseUrl = this.configService.get<string>('GOGODUK_API_URL');
+    const apiKey = this.configService.get<string>('GOGODUK_API_KEY');
+
+    if (!baseUrl || !apiKey) {
+      this.logger.warn('Thiếu GOGODUK_API_URL hoặc GOGODUK_API_KEY trong .env');
+      return null;
+    }
+
+    try {
+      const res = await firstValueFrom(
+        this.httpService.get<{ result: PlaceDetail }>(
+          `${baseUrl}/v1/place/resolve`,
+          {
+            params: { id, lang: 'vi' },
+            headers: { 'X-API-Key': apiKey },
+          },
+        ),
+      );
+      return res.data?.result ?? null;
+    } catch (err) {
+      this.logger.error(
+        `Gọi gogoduk resolve thất bại: ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
     }
   }
 }

@@ -48,6 +48,14 @@ export class Product {
   @Column({ default: true })
   isActive: boolean;
 
+  // Điểm đánh giá trung bình (0..5) — denormalize từ collection reviews để đọc nhanh
+  @Column({ type: 'double', default: 0 })
+  averageRating: number;
+
+  // Số lượng đánh giá — cập nhật cùng averageRating mỗi khi review thêm/sửa/xóa
+  @Column({ type: 'int', default: 0 })
+  reviewCount: number;
+
   @CreateDateColumn()
   createdAt: Date;
 

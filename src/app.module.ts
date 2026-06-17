@@ -16,6 +16,7 @@ import { SubcategoriesModule } from './subcategories/subcategories.module';
 import { ManufacturersModule } from './manufacturers/manufacturers.module';
 import { CloudinaryModule } from './cloudinary/cloudinary.module';
 import { DashboardModule } from './dashboard/dashboard.module';
+import { ReviewsModule } from './reviews/reviews.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { RolesGuard } from './auth/guards/roles.guard';
 import { User } from './users/entities/user.entity';
@@ -26,6 +27,7 @@ import { Subcategory } from './subcategories/entities/subcategory.entity';
 import { Manufacturer } from './manufacturers/entities/manufacturer.entity';
 import { Order } from './orders/entities/order.entity';
 import { Address } from './addresses/entities/address.entity';
+import { Review } from './reviews/entities/review.entity';
 
 @Module({
   imports: [
@@ -49,6 +51,7 @@ import { Address } from './addresses/entities/address.entity';
           Manufacturer,
           Order,
           Address,
+          Review,
         ],
         synchronize: true,          // Tự tạo collection. Tắt trong production!
         useUnifiedTopology: true,
@@ -67,6 +70,7 @@ import { Address } from './addresses/entities/address.entity';
     SubcategoriesModule,
     ManufacturersModule,
     DashboardModule,
+    ReviewsModule,
   ],
   controllers: [AppController],
   providers: [

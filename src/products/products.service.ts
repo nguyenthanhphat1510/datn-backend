@@ -164,6 +164,21 @@ export class ProductsService {
     return this.productsRepository.save(product);
   }
 
+  /**
+   * Cập nhật điểm đánh giá trung bình + số lượng review của sản phẩm.
+   * Được ReviewsService gọi mỗi khi review thêm/sửa/xóa (denormalize).
+   */
+  async setRating(
+    id: string,
+    averageRating: number,
+    reviewCount: number,
+  ): Promise<Product> {
+    const product = await this.findOne(id);
+    product.averageRating = averageRating;
+    product.reviewCount = reviewCount;
+    return this.productsRepository.save(product);
+  }
+
   /** Cập nhật tồn kho */
   async updateStock(id: string, quantity: number): Promise<Product> {
     const product = await this.findOne(id);

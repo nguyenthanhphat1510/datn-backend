@@ -69,13 +69,16 @@ export class CartService {
       cart.items.map(async (item) => {
         const product = await this.productsService.findOne(item.productId);
 
+        // Giá bán thực tế = giá khuyến mãi nếu có, ngược lại là giá gốc
+        const unitPrice = product.salePrice ?? product.price;
+
         return {
           productId: item.productId,
           name: product.name,
           imageUrl: product.images?.[0]?.url ?? '',
-          price: product.price,
+          price: unitPrice,
           quantity: item.quantity,
-          subtotal: product.price * item.quantity,
+          subtotal: unitPrice * item.quantity,
         } as CartItemResponse;
       }),
     );

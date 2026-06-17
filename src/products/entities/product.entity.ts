@@ -18,8 +18,14 @@ export class Product {
   @Column({ nullable: true })
   description: string;
 
+  // Giá gốc (giá niêm yết)
   @Column({ type: 'double' })
   price: number;
+
+  // Giá khuyến mãi (giá bán thực tế). null = không giảm giá.
+  // Luôn nhỏ hơn price khi có giá trị.
+  @Column({ type: 'double', nullable: true })
+  salePrice: number | null;
 
   @Column({ type: 'int', default: 0 })
   stock: number;

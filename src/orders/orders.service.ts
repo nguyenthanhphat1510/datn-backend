@@ -1,8 +1,13 @@
 // src/orders/orders.service.ts
 
-import { Injectable, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { MongoRepository } from 'typeorm';
+import { ObjectId } from 'mongodb';
 import {
   Order,
   OrderStatus,
@@ -98,14 +103,17 @@ export class OrdersService {
         );
       }
 
+      // Giá bán thực tế = giá khuyến mãi nếu có, ngược lại là giá gốc
+      const unitPrice = product.salePrice ?? product.price;
+
       // Snapshot thông tin sản phẩm tại thời điểm mua — đóng băng dữ liệu
       orderItems.push({
         productId: cartItem.productId,
         name: product.name, // Snapshot tên
         imageUrl: product.images?.[0]?.url ?? '', // Snapshot ảnh
-        price: product.price, // ⭐ Snapshot giá
+        price: unitPrice, // ⭐ Snapshot giá đã áp khuyến mãi
         quantity: cartItem.quantity,
-        subtotal: product.price * cartItem.quantity, // Tính sẵn
+        subtotal: unitPrice * cartItem.quantity, // Tính sẵn
       });
     }
 
@@ -150,5 +158,40 @@ export class OrdersService {
       where: { userId },
       order: { createdAt: 'DESC' } as any,
     });
+  }
+
+  /** [Admin] Tất cả đơn hàng (phân trang), mới nhất lên đầu. */
+  async findAllAdmin(
+    status?: OrderStatus,
+    pagination: { page?: number; limit?: number } = {},
+  ): Promise<{ data: Order[]; total: number; page: number; limit: number }> {
+    const where = status ? { status } : {};
+    const page = Math.max(1, pagination.page ?? 1);
+    const limit = Math.min(100, Math.max(1, pagination.limit ?? 10));
+    const skip = (page - 1) * limit;
+
+    const [data, total] = await this.ordersRepository.findAndCount({
+      where,
+      skip,
+      take: limit,
+      order: { createdAt: 'DESC' } as any,
+    });
+
+    return { data, total, page, limit };
+  }
+
+  /** [Admin] Cập nhật trạng thái 1 đơn hàng. */
+  async updateStatus(orderId: string, status: OrderStatus): Promise<Order> {
+    if (!ObjectId.isValid(orderId)) {
+      throw new BadRequestException('ID đơn hàng không hợp lệ');
+    }
+    const order = await this.ordersRepository.findOne({
+      where: { _id: new ObjectId(orderId) },
+    });
+    if (!order) {
+      throw new NotFoundException(`Không tìm thấy đơn hàng với ID: ${orderId}`);
+    }
+    order.status = status;
+    return this.ordersRepository.save(order);
   }
 }

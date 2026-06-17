@@ -8,6 +8,7 @@ import {
   IsMongoId,
   Min,
   MaxLength,
+  ValidateIf,
 } from 'class-validator';
 
 export class CreateProductDto {
@@ -23,6 +24,14 @@ export class CreateProductDto {
   @IsNumber({}, { message: 'Giá phải là số' })
   @Min(0, { message: 'Giá không được âm' })
   price: number;
+
+  // Giá khuyến mãi (tùy chọn). Bỏ trống = không giảm giá.
+  // Phải nhỏ hơn giá gốc.
+  @IsOptional()
+  @ValidateIf((o) => o.salePrice !== null && o.salePrice !== undefined)
+  @IsNumber({}, { message: 'Giá khuyến mãi phải là số' })
+  @Min(0, { message: 'Giá khuyến mãi không được âm' })
+  salePrice?: number | null;
 
   @IsInt({ message: 'Tồn kho phải là số nguyên' })
   @Min(0, { message: 'Tồn kho không được âm' })

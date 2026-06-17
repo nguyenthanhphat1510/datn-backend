@@ -32,11 +32,31 @@ export class ProductsService {
     private readonly cloudinaryService: CloudinaryService,
   ) {}
 
+  /**
+   * Kiểm tra giá khuyến mãi hợp lệ: nếu có salePrice thì phải > 0 và < giá gốc.
+   * @param salePrice giá khuyến mãi muốn áp (có thể null/undefined)
+   * @param price giá gốc cuối cùng của sản phẩm
+   */
+  private validateSalePrice(
+    salePrice: number | null | undefined,
+    price: number,
+  ): void {
+    if (salePrice === null || salePrice === undefined) return;
+    if (salePrice >= price) {
+      throw new BadRequestException(
+        'Giá khuyến mãi phải nhỏ hơn giá gốc',
+      );
+    }
+  }
+
   /** Tạo sản phẩm mới */
   async create(createProductDto: CreateProductDto): Promise<Product> {
+    this.validateSalePrice(createProductDto.salePrice, createProductDto.price);
+
     // TypeORM Mongo không áp @Column default cho field bị undefined → set explicit
     const product = this.productsRepository.create({
       ...createProductDto,
+      salePrice: createProductDto.salePrice ?? null,
       isActive: createProductDto.isActive ?? true,
     });
     product.images = [];
@@ -104,6 +124,14 @@ export class ProductsService {
   /** Cập nhật sản phẩm */
   async update(id: string, updateProductDto: UpdateProductDto): Promise<Product> {
     const product = await this.findOne(id); // sẽ throw nếu không tồn tại
+
+    // Validate salePrice với giá gốc cuối cùng (sau khi merge thay đổi)
+    const finalPrice = updateProductDto.price ?? product.price;
+    const finalSalePrice =
+      updateProductDto.salePrice !== undefined
+        ? updateProductDto.salePrice
+        : product.salePrice;
+    this.validateSalePrice(finalSalePrice, finalPrice);
 
     Object.assign(product, updateProductDto);
     return this.productsRepository.save(product);

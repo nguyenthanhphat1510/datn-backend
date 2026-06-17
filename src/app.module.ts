@@ -15,6 +15,7 @@ import { AddressSuggestModule } from './address-suggest/address-suggest.module';
 import { SubcategoriesModule } from './subcategories/subcategories.module';
 import { ManufacturersModule } from './manufacturers/manufacturers.module';
 import { CloudinaryModule } from './cloudinary/cloudinary.module';
+import { DashboardModule } from './dashboard/dashboard.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { RolesGuard } from './auth/guards/roles.guard';
 import { User } from './users/entities/user.entity';
@@ -65,6 +66,7 @@ import { Address } from './addresses/entities/address.entity';
     AddressSuggestModule,
     SubcategoriesModule,
     ManufacturersModule,
+    DashboardModule,
   ],
   controllers: [AppController],
   providers: [

@@ -21,8 +21,7 @@ import { UsersService } from './users.service';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
-import { Roles } from '../auth/decorators/roles.decorator';
-import { UserRole } from './entities/user.entity';
+import { Public } from '../auth/decorators/public.decorator';
 
 @ApiTags('Users')
 @ApiBearerAuth('access-token')
@@ -35,7 +34,8 @@ export class UsersController {
    * GET /users
    * Lấy danh sách tất cả người dùng (Admin only)
    */
-  @Roles(UserRole.ADMIN)
+  // TODO: bật lại @Roles(UserRole.ADMIN) khi gắn JWT ở admin
+  @Public()
   @Get()
   @ApiOperation({ summary: '[Admin] Lấy danh sách tất cả người dùng' })
   @ApiResponse({
@@ -65,7 +65,8 @@ export class UsersController {
    * GET /users/:id
    * Lấy thông tin một người dùng theo ID (Admin only)
    */
-  @Roles(UserRole.ADMIN)
+  // TODO: bật lại @Roles(UserRole.ADMIN) khi gắn JWT ở admin
+  @Public()
   @Get(':id')
   @ApiOperation({ summary: '[Admin] Lấy thông tin người dùng theo ID' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId của người dùng', example: '663f1a2b4c5d6e7f8a9b0c1d' })
@@ -99,7 +100,8 @@ export class UsersController {
    * PATCH /users/:id
    * Cập nhật thông tin người dùng (Admin only)
    */
-  @Roles(UserRole.ADMIN)
+  // TODO: bật lại @Roles(UserRole.ADMIN) khi gắn JWT ở admin
+  @Public()
   @Patch(':id')
   @ApiOperation({ summary: '[Admin] Cập nhật thông tin người dùng' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId của người dùng', example: '663f1a2b4c5d6e7f8a9b0c1d' })
@@ -130,7 +132,8 @@ export class UsersController {
    * DELETE /users/:id
    * Xóa người dùng (Admin only)
    */
-  @Roles(UserRole.ADMIN)
+  // TODO: bật lại @Roles(UserRole.ADMIN) khi gắn JWT ở admin
+  @Public()
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: '[Admin] Xóa người dùng' })

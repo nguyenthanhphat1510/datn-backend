@@ -1,0 +1,566 @@
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { InjectRepository } from '@nestjs/typeorm';
+import { MongoRepository } from 'typeorm';
+import { ObjectId } from 'mongodb';
+import { GoogleGenAI, Type } from '@google/genai';
+import { ChatMessageDto } from './dto/chat.dto';
+import { Disease } from '../diseases/entities/disease.entity';
+import { Product } from '../products/entities/product.entity';
+import {
+  EmbeddingService,
+  EMBEDDING_DIM,
+} from '../common/embedding/embedding.service';
+
+// Tên Vector Search Index tạo trên Atlas cho collection diseases (xem hướng dẫn).
+const DISEASE_VECTOR_INDEX = 'disease_vector_index';
+
+// Ngưỡng cosine tối thiểu để coi là "có khả năng đúng bệnh". Dưới ngưỡng → coi
+// như không tìm thấy (tránh vector search luôn trả top-1 kể cả câu lạc đề).
+// gemini-embedding-001 cho điểm nền cao (~0.77 cả với câu lạc đề), trong khi câu
+// mô tả triệu chứng đúng đạt ~0.88+. Chọn 0.82 để tách hai vùng này.
+const VECTOR_MIN_SCORE = 0.82;
+
+// Vùng cosine "trên ngưỡng đến gần như chắc chắn" để ánh xạ ra % trực quan.
+// gemini-embedding-001 dồn điểm trong khoảng hẹp nên map [0.82..0.95] → [60..99]%
+// để con số phản ánh đúng mức tin cậy thay vì luôn ~85-92%.
+const SCORE_CONF_MIN = 0.82;
+const SCORE_CONF_MAX = 0.95;
+
+const MODEL = 'gemini-3.1-flash-lite';
+
+// 5 nhóm intent mà chatbot phân loại câu hỏi người dùng vào.
+export const INTENTS = [
+  'ky_thuat',
+  'trieu_chung',
+  'san_pham',
+  'don_hang',
+  'khac',
+] as const;
+export type Intent = (typeof INTENTS)[number];
+
+// Map mỗi intent → câu thông báo debug (bước này các nhánh chưa xử lý thật).
+const INTENT_LABEL: Record<Intent, string> = {
+  ky_thuat: '[intent=ky_thuat] Nhánh: Kỹ thuật canh tác lúa',
+  trieu_chung: '[intent=trieu_chung] Nhánh: Chẩn đoán bệnh qua triệu chứng',
+  san_pham: '[intent=san_pham] Nhánh: Tìm sản phẩm',
+  don_hang: '[intent=don_hang] Nhánh: Đơn hàng / giỏ hàng',
+  khac: '[intent=khac] Nhánh: Chào hỏi / ngoài phạm vi',
+};
+
+// Hướng dẫn Gemini phân loại câu hỏi vào đúng 1 trong 5 nhóm.
+const CLASSIFY_INSTRUCTION = `Bạn là bộ phân loại ý định (intent) cho chatbot nông nghiệp TP Agri (chuyên về cây lúa).
+Hãy đọc cuộc hội thoại và phân loại TIN NHẮN MỚI NHẤT của người dùng vào ĐÚNG MỘT nhóm:
+- ky_thuat: hỏi về kỹ thuật canh tác lúa (làm đất, gieo sạ, bón phân, tưới nước, mùa vụ...).
+- trieu_chung: mô tả triệu chứng/dấu hiệu bất thường trên cây lúa để nhờ đoán bệnh (vd "lá bị đốm nâu", "cây vàng lá").
+- san_pham: hỏi hoặc tìm sản phẩm để mua (thuốc, phân bón) — giá cả, công dụng, "có loại nào trị...".
+- don_hang: hỏi về đơn hàng hoặc giỏ hàng của chính người dùng (trạng thái giao, đã mua gì, giỏ hàng).
+- khac: chào hỏi, cảm ơn, hoặc câu ngoài phạm vi cây lúa / dịch vụ TP Agri.
+Trả về JSON gồm: intent (1 trong 5 giá trị trên), confidence (0..1 độ chắc chắn), reason (1 câu tiếng Việt giải thích vì sao chọn nhóm này).`;
+
+// Hướng dẫn Gemini diễn đạt câu trả lời chẩn đoán bệnh (nhánh trieu_chung).
+// Chỉ được dùng dữ liệu bệnh trong context (RAG), không bịa thêm.
+// LƯU Ý: thuốc gợi ý được FE hiển thị thành thẻ riêng — Gemini KHÔNG liệt kê
+// tên/giá thuốc trong văn bản, chỉ dẫn dắt "tham khảo các sản phẩm bên dưới".
+const DIAGNOSE_INSTRUCTION = `Bạn là trợ lý nông nghiệp TP Agri, tư vấn về bệnh cây lúa.
+Người dùng mô tả triệu chứng. Bạn được cung cấp THÔNG TIN MỘT BỆNH nghi ngờ (lấy từ cơ sở dữ liệu).
+Yêu cầu:
+- CHỈ dùng thông tin trong context được cung cấp; KHÔNG bịa thêm bệnh hay triệu chứng khác.
+- Nếu triệu chứng người dùng rõ ràng KHÔNG khớp với bệnh trong context, hãy nói thật là chưa chắc chắn và khuyên mô tả rõ hơn hoặc liên hệ nhân viên — đừng gượng ép.
+- Nếu khớp: trả lời ngắn gọn, thân thiện bằng tiếng Việt: nêu tên bệnh nghi ngờ và mô tả/đặc điểm nhận biết ngắn gọn.
+- TUYỆT ĐỐI KHÔNG liệt kê tên thuốc hay giá tiền trong câu trả lời. Nếu context cho biết CÓ thuốc gợi ý, chỉ cần kết bằng câu mời người dùng tham khảo các sản phẩm gợi ý hiển thị bên dưới.
+- Văn phong tự nhiên, không dùng JSON, không markdown phức tạp. Tối đa khoảng 4-6 câu.`;
+
+// Bỏ dấu tiếng Việt + viết thường để luật từ khóa bắt được cả câu không dấu.
+function normalize(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '') // bỏ dấu thanh/dấu mũ
+    .replace(/đ/g, 'd')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Luật từ khóa, xét theo THỨ TỰ trong mảng (trên xuống) — luật đầu khớp sẽ thắng.
+// Thứ tự được sắp để xử lý câu "chồng nhóm": ví dụ "lá đốm nâu, có thuốc nào trị"
+// vừa là triệu chứng vừa hỏi sản phẩm → san_pham đứng trước nên thắng (đúng ý định mua).
+// Từ khóa đã ở dạng đã normalize (không dấu, viết thường).
+const KEYWORD_RULES: { intent: Intent; keywords: string[] }[] = [
+  // don_hang: rất đặc trưng, hiếm khi nhầm → ưu tiên cao nhất.
+  {
+    intent: 'don_hang',
+    keywords: [
+      'don hang',
+      'don cua toi',
+      'giao toi dau',
+      'giao den dau',
+      'da mua',
+      'lich su mua',
+      'gio hang',
+      'tra cuu don',
+      'theo doi don',
+      'ma don',
+    ],
+  },
+  // san_pham: có ý định mua / hỏi giá → thắng triệu chứng nếu cùng xuất hiện.
+  {
+    intent: 'san_pham',
+    keywords: [
+      'gia bao nhieu',
+      'bao nhieu tien',
+      'gia ',
+      'mua ',
+      'co thuoc',
+      'thuoc nao',
+      'loai thuoc',
+      'san pham',
+      'con hang',
+      'dat mua',
+      'tu van phan bon',
+      'thuoc tri sau benh',
+    ],
+  },
+  // trieu_chung: chỉ bắt cụm rõ ràng (vd nút "Chẩn đoán bệnh lúa"); mô tả triệu
+  // chứng tự do để Gemini lo vì diễn đạt quá đa dạng, dễ bắt nhầm.
+  {
+    intent: 'trieu_chung',
+    keywords: ['chan doan benh', 'cay lua bi benh gi', 'la lua bi benh gi'],
+  },
+  // khac: chào hỏi / cảm ơn / liên hệ.
+  {
+    intent: 'khac',
+    keywords: [
+      'xin chao',
+      'chao shop',
+      'chao ban',
+      'hello',
+      'hi ',
+      'cam on',
+      'cảm ơn',
+      'tam biet',
+      'lien he nhan vien',
+      'gap nhan vien',
+    ],
+  },
+];
+
+// Thẻ sản phẩm thuốc gợi ý đính kèm câu trả lời chẩn đoán (nhánh trieu_chung).
+export interface ChatProduct {
+  id: string;
+  name: string;
+  price: number; // giá bán thực tế (salePrice nếu có, ngược lại price)
+  originalPrice: number | null; // giá gốc nếu đang giảm giá (để gạch ngang); null = không giảm
+  image: string | null;
+  rating: number; // điểm trung bình 0..5
+  reviewCount: number; // số lượt đánh giá
+}
+
+// Mức độ tin cậy chẩn đoán để FE đổi màu/nhãn.
+export type DiagnosisLevel = 'cao' | 'trung_binh' | 'thap';
+
+// Kết quả chẩn đoán bệnh để FE render thành "thẻ chẩn đoán".
+export interface Diagnosis {
+  disease: string; // tên bệnh
+  confidence: number; // 0..100 (đã ánh xạ từ cosine score sang % trực quan)
+  level: DiagnosisLevel;
+}
+
+export interface ChatResult {
+  intent: Intent;
+  confidence: number;
+  reason: string;
+  reply: string;
+  source: 'rule' | 'gemini' | 'fallback';
+  // Chỉ có ở nhánh trieu_chung khi tìm được bệnh + có thuốc gợi ý.
+  products?: ChatProduct[];
+  // Chỉ có ở nhánh trieu_chung khi vector search tìm được bệnh trên ngưỡng.
+  diagnosis?: Diagnosis;
+}
+
+@Injectable()
+export class ChatbotService {
+  private readonly logger = new Logger(ChatbotService.name);
+  private readonly ai: GoogleGenAI | null;
+
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly embeddingService: EmbeddingService,
+    @InjectRepository(Disease)
+    private readonly diseasesRepository: MongoRepository<Disease>,
+    @InjectRepository(Product)
+    private readonly productsRepository: MongoRepository<Product>,
+  ) {
+    const apiKey = this.configService.get<string>('GEMINI_API_KEY');
+    this.ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
+    if (!this.ai) {
+      this.logger.warn('Thiếu GEMINI_API_KEY trong .env — chatbot sẽ không hoạt động');
+    }
+  }
+
+  /**
+   * Phân loại intent rồi trả về thông báo debug cho biết đã vào nhánh nào.
+   * Bước này CHƯA xử lý nhánh thật — chỉ để test khả năng phân loại đầu vào.
+   */
+  async chat(messages: ChatMessageDto[]): Promise<ChatResult> {
+    if (!this.ai) {
+      throw new ServiceUnavailableException(
+        'Chatbot chưa được cấu hình (thiếu GEMINI_API_KEY)',
+      );
+    }
+
+    // Lấy tin nhắn mới nhất của người dùng để thử luật từ khóa trước.
+    const lastUser = [...messages]
+      .reverse()
+      .find((m) => m.role === 'user')?.content;
+
+    // Lớp 1: luật từ khóa — câu rõ ràng được gán intent ngay, không tốn request Gemini.
+    const ruleIntent = lastUser ? this.ruleClassify(lastUser) : null;
+    if (ruleIntent) {
+      const diag =
+        ruleIntent === 'trieu_chung' && lastUser
+          ? await this.handleTrieuChung(lastUser)
+          : null;
+      return {
+        intent: ruleIntent,
+        confidence: 1,
+        reason: 'Khớp luật từ khóa',
+        reply: diag ? diag.reply : INTENT_LABEL[ruleIntent],
+        source: 'rule',
+        ...(diag && diag.products.length ? { products: diag.products } : {}),
+        ...(diag?.diagnosis ? { diagnosis: diag.diagnosis } : {}),
+      };
+    }
+
+    // Lớp 2: câu mơ hồ / không khớp luật → để Gemini phân loại.
+    const { intent, confidence, reason, source } =
+      await this.classifyIntent(messages);
+
+    // Nhánh trieu_chung: chẩn đoán thật bằng RAG (vector search + Gemini diễn đạt).
+    const diag =
+      intent === 'trieu_chung' && lastUser
+        ? await this.handleTrieuChung(lastUser)
+        : null;
+    return {
+      intent,
+      confidence,
+      reason,
+      reply: diag ? diag.reply : INTENT_LABEL[intent],
+      source,
+      ...(diag && diag.products.length ? { products: diag.products } : {}),
+      ...(diag?.diagnosis ? { diagnosis: diag.diagnosis } : {}),
+    };
+  }
+
+  /* ─────────────────────────────────────────
+     Nhánh trieu_chung — RAG chẩn đoán bệnh lúa
+     Retrieval: Atlas Vector Search lấy bệnh gần nghĩa nhất.
+     Generation: Gemini diễn đạt câu tư vấn + đính kèm thuốc gợi ý.
+  ───────────────────────────────────────── */
+
+  /**
+   * Chẩn đoán bệnh từ mô tả triệu chứng của người dùng.
+   * 1) Embedding câu hỏi → 2) vector search top-1 bệnh → 3) lấy thuốc gợi ý
+   * → 4) Gemini diễn đạt câu trả lời tự nhiên (hoặc từ chối nếu không khớp).
+   */
+  private async handleTrieuChung(
+    userText: string,
+  ): Promise<{
+    reply: string;
+    products: ChatProduct[];
+    diagnosis?: Diagnosis;
+  }> {
+    // B1: tìm bệnh gần nghĩa nhất qua Atlas Vector Search.
+    const match = await this.findBestDisease(userText);
+
+    // Không có bệnh nào đủ giống (hoặc embedding chưa sẵn sàng) → trả lời an toàn.
+    if (!match) {
+      return {
+        reply:
+          'Mình chưa nhận ra chính xác bệnh từ mô tả này. Bạn thử mô tả rõ hơn về ' +
+          'vị trí và màu sắc vết bệnh trên lá/thân lúa, hoặc bấm "Liên hệ nhân viên" ' +
+          'để được hỗ trợ trực tiếp nhé.',
+        products: [],
+      };
+    }
+
+    // Ánh xạ điểm cosine sang thẻ chẩn đoán (tên bệnh + % + mức độ) cho FE.
+    const diagnosis = this.buildDiagnosis(match.disease.name, match.score);
+
+    // B2: lấy danh sách thuốc gợi ý (đang còn active) theo recommendedProductIds.
+    const products = await this.loadRecommendedProducts(
+      match.disease.recommendedProductIds ?? [],
+    );
+
+    // B3: Gemini diễn đạt phần chẩn đoán (thuốc tách ra thẻ riêng, không nhét vào text).
+    const reply = await this.composeDiagnosisReply(
+      userText,
+      match.disease,
+      products,
+    );
+
+    // Map sang thẻ sản phẩm gọn cho FE render.
+    const cards: ChatProduct[] = products.map((p) => ({
+      id: p._id.toString(),
+      name: p.name,
+      price: p.salePrice ?? p.price,
+      // Có salePrice nghĩa là đang giảm → giá gốc là p.price (để FE gạch ngang).
+      originalPrice: p.salePrice != null ? p.price : null,
+      image: p.images?.[0]?.url ?? null,
+      rating: p.averageRating ?? 0,
+      reviewCount: p.reviewCount ?? 0,
+    }));
+
+    return { reply, products: cards, diagnosis };
+  }
+
+  /**
+   * Ánh xạ điểm cosine của vector search sang thẻ chẩn đoán cho FE:
+   * - confidence: % trực quan (map [0.82..0.95] → [60..99]).
+   * - level: nhãn mức độ để FE đổi màu (cao / trung bình / thấp).
+   */
+  private buildDiagnosis(disease: string, score: number): Diagnosis {
+    const ratio =
+      (score - SCORE_CONF_MIN) / (SCORE_CONF_MAX - SCORE_CONF_MIN);
+    const clamped = Math.min(1, Math.max(0, ratio));
+    const confidence = Math.round(60 + clamped * 39); // 60..99
+
+    let level: DiagnosisLevel;
+    if (score >= 0.88) level = 'cao';
+    else if (score >= 0.84) level = 'trung_binh';
+    else level = 'thap';
+
+    return { disease, confidence, level };
+  }
+
+  /**
+   * Atlas Vector Search: embed câu hỏi rồi tìm bệnh có embedding gần nhất.
+   * Trả về null nếu: chưa cấu hình embedding, lỗi truy vấn, hoặc score < ngưỡng.
+   */
+  private async findBestDisease(
+    userText: string,
+  ): Promise<{ disease: Disease; score: number } | null> {
+    if (!this.embeddingService.enabled) return null;
+
+    let queryVector: number[];
+    try {
+      queryVector = await this.embeddingService.embedQuery(userText);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Embedding câu hỏi thất bại: ${msg}`);
+      return null;
+    }
+    if (queryVector.length !== EMBEDDING_DIM) return null;
+
+    try {
+      const results = (await this.diseasesRepository
+        .aggregate([
+          {
+            $vectorSearch: {
+              index: DISEASE_VECTOR_INDEX,
+              path: 'embedding',
+              queryVector,
+              numCandidates: 100,
+              limit: 1,
+            },
+          },
+          {
+            // Lọc chỉ bệnh đang active + lấy điểm tương đồng để so ngưỡng.
+            $project: {
+              name: 1,
+              slug: 1,
+              symptoms: 1,
+              description: 1,
+              recommendedProductIds: 1,
+              images: 1,
+              isActive: 1,
+              score: { $meta: 'vectorSearchScore' },
+            },
+          },
+        ])
+        .toArray()) as Array<Disease & { score: number }>;
+
+      const top = results[0];
+      if (!top || top.isActive === false) return null;
+      if (top.score < VECTOR_MIN_SCORE) return null;
+
+      return { disease: top, score: top.score };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Lỗi thường gặp: chưa tạo Vector Search Index trên Atlas → báo log rõ.
+      this.logger.error(
+        `Vector search thất bại (đã tạo index "${DISEASE_VECTOR_INDEX}" trên Atlas chưa?): ${msg}`,
+      );
+      return null;
+    }
+  }
+
+  /** Lấy thông tin các sản phẩm thuốc gợi ý (chỉ lấy bản đang active). */
+  private async loadRecommendedProducts(ids: string[]): Promise<Product[]> {
+    const objectIds = ids
+      .filter((id) => ObjectId.isValid(id))
+      .map((id) => new ObjectId(id));
+    if (objectIds.length === 0) return [];
+
+    try {
+      return await this.productsRepository.find({
+        where: { _id: { $in: objectIds }, isActive: true } as any,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Tải thuốc gợi ý thất bại: ${msg}`);
+      return [];
+    }
+  }
+
+  /**
+   * Gemini diễn đạt câu trả lời chẩn đoán. Context = bệnh + thuốc lấy từ DB; mô
+   * hình chỉ được dùng dữ liệu này, không bịa thêm bệnh/thuốc khác.
+   */
+  private async composeDiagnosisReply(
+    userText: string,
+    disease: Disease,
+    products: Product[],
+  ): Promise<string> {
+    // Chỉ báo CÓ/KHÔNG thuốc gợi ý để Gemini dẫn dắt câu — không đưa tên/giá vào
+    // text (thuốc render thành thẻ riêng ở FE).
+    const medsHint = products.length
+      ? `Có ${products.length} sản phẩm thuốc gợi ý sẽ hiển thị bên dưới (đừng liệt kê tên/giá trong câu trả lời).`
+      : 'Hiện chưa có thuốc gợi ý trong hệ thống (đừng nhắc đến thuốc).';
+
+    const context = `BỆNH NGHI NGỜ (lấy từ cơ sở dữ liệu, chỉ dùng dữ liệu này):
+Tên bệnh: ${disease.name}
+Triệu chứng: ${(disease.symptoms ?? []).join('; ') || '(không có)'}
+Mô tả: ${disease.description || '(không có)'}
+${medsHint}`;
+
+    try {
+      const response = await this.ai!.models.generateContent({
+        model: MODEL,
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: `Người dùng mô tả: "${userText}"\n\n${context}`,
+              },
+            ],
+          },
+        ],
+        config: {
+          systemInstruction: DIAGNOSE_INSTRUCTION,
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+      });
+
+      const reply = (response.text ?? '').trim();
+      if (reply) return reply;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Diễn đạt chẩn đoán thất bại: ${msg}`);
+    }
+
+    // Fallback nếu Gemini lỗi/rỗng: ghép câu trả lời cơ bản từ dữ liệu DB.
+    // Không liệt kê thuốc trong text — thuốc đã ở thẻ riêng do FE render.
+    const intro = `Theo mô tả của bạn, nhiều khả năng cây lúa bị **${disease.name}**.`;
+    const desc = disease.description ? `\n${disease.description}` : '';
+    const meds = products.length
+      ? '\n\nBạn tham khảo các sản phẩm gợi ý bên dưới nhé.'
+      : '';
+    return `${intro}${desc}${meds}`;
+  }
+
+  /**
+   * Phân loại nhanh bằng luật từ khóa. Trả về intent nếu khớp, null nếu không
+   * (để rơi xuống Gemini). Xét KEYWORD_RULES theo thứ tự ưu tiên đã định.
+   */
+  private ruleClassify(text: string): Intent | null {
+    const norm = normalize(text);
+    for (const rule of KEYWORD_RULES) {
+      if (rule.keywords.some((kw) => norm.includes(kw))) {
+        return rule.intent;
+      }
+    }
+    return null;
+  }
+
+  /** Gọi Gemini phân loại tin nhắn mới nhất vào 1 trong 5 nhóm intent (JSON ép kiểu). */
+  private async classifyIntent(messages: ChatMessageDto[]): Promise<{
+    intent: Intent;
+    confidence: number;
+    reason: string;
+    source: 'gemini' | 'fallback';
+  }> {
+    const fallback = {
+      intent: 'khac' as Intent,
+      confidence: 0,
+      reason: 'không phân loại được',
+      source: 'fallback' as const,
+    };
+
+    // Map messages của frontend → contents của Gemini ("assistant" → "model").
+    const contents = messages.map((m) => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    }));
+
+    try {
+      const response = await this.ai!.models.generateContent({
+        model: MODEL,
+        contents,
+        config: {
+          systemInstruction: CLASSIFY_INSTRUCTION,
+          // Tắt thinking: phân loại là tác vụ đơn giản, cần JSON sạch + nhanh + ổn định.
+          thinkingConfig: { thinkingBudget: 0 },
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              intent: { type: Type.STRING, enum: [...INTENTS] },
+              confidence: { type: Type.NUMBER },
+              reason: { type: Type.STRING },
+            },
+            required: ['intent', 'confidence', 'reason'],
+          },
+        },
+      });
+
+      const raw = (response.text ?? '').trim();
+      if (!raw) return fallback;
+
+      const parsed = JSON.parse(raw) as {
+        intent?: string;
+        confidence?: number;
+        reason?: string;
+      };
+
+      // Phòng trường hợp Gemini trả intent ngoài danh sách.
+      if (!parsed.intent || !INTENTS.includes(parsed.intent as Intent)) {
+        return fallback;
+      }
+
+      return {
+        intent: parsed.intent as Intent,
+        confidence:
+          typeof parsed.confidence === 'number' ? parsed.confidence : 0,
+        reason: parsed.reason ?? '',
+        source: 'gemini',
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Phân loại intent thất bại: ${msg}`);
+      // Lỗi gọi API (vd hết quota 429, mất mạng) → báo rõ để không nhầm là phân
+      // loại sai. Riêng lỗi parse JSON thì coi như "khac" để không vỡ luồng test.
+      if (err instanceof SyntaxError) {
+        return fallback;
+      }
+      throw new ServiceUnavailableException(
+        'Không gọi được Gemini để phân loại (có thể hết quota API). Vui lòng thử lại sau.',
+      );
+    }
+  }
+}

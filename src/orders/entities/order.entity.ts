@@ -18,6 +18,20 @@ export enum OrderStatus {
   CANCELLED = 'cancelled', // Đã hủy
 }
 
+// Phương thức thanh toán
+export enum PaymentMethod {
+  COD = 'cod', // Thanh toán khi nhận hàng
+  VNPAY = 'vnpay', // Thanh toán qua cổng VNPay
+  MOMO = 'momo', // Thanh toán qua ví MoMo
+}
+
+// Trạng thái thanh toán — tách biệt với trạng thái giao hàng
+export enum PaymentStatus {
+  UNPAID = 'unpaid', // Chưa thanh toán (COD luôn ở trạng thái này tới khi giao)
+  PAID = 'paid', // Đã thanh toán thành công
+  FAILED = 'failed', // Thanh toán thất bại / bị hủy
+}
+
 // Mỗi sản phẩm trong đơn hàng — embedded document
 export interface OrderItem {
   productId: string; // Tham chiếu đến Product
@@ -67,6 +81,37 @@ export class Order {
 
   @Column({ nullable: true })
   note: string; // Ghi chú của khách (tùy chọn)
+
+  // ── Thông tin thanh toán ────────────────────────────────────────────────
+  @Column({
+    type: 'enum',
+    enum: PaymentMethod,
+    default: PaymentMethod.COD,
+  })
+  paymentMethod: PaymentMethod; // COD mặc định
+
+  @Column({
+    type: 'enum',
+    enum: PaymentStatus,
+    default: PaymentStatus.UNPAID,
+  })
+  paymentStatus: PaymentStatus;
+
+  // Mã tham chiếu giao dịch do hệ thống sinh (gửi sang VNPay làm vnp_TxnRef)
+  @Column({ nullable: true })
+  paymentTxnRef?: string;
+
+  // Mã giao dịch do VNPay trả về (vnp_TransactionNo)
+  @Column({ nullable: true })
+  vnpayTransactionNo?: string;
+
+  // Mã giao dịch do MoMo trả về (transId)
+  @Column({ nullable: true })
+  momoTransId?: string;
+
+  // Thời điểm thanh toán thành công
+  @Column({ nullable: true })
+  paidAt?: Date;
 
   @CreateDateColumn()
   createdAt: Date;

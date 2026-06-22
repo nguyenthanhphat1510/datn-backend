@@ -17,6 +17,9 @@ import { ManufacturersModule } from './manufacturers/manufacturers.module';
 import { CloudinaryModule } from './cloudinary/cloudinary.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { ReviewsModule } from './reviews/reviews.module';
+import { ChatbotModule } from './chatbot/chatbot.module';
+import { DiseasesModule } from './diseases/diseases.module';
+import { EmbeddingModule } from './common/embedding/embedding.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { RolesGuard } from './auth/guards/roles.guard';
 import { User } from './users/entities/user.entity';
@@ -28,6 +31,7 @@ import { Manufacturer } from './manufacturers/entities/manufacturer.entity';
 import { Order } from './orders/entities/order.entity';
 import { Address } from './addresses/entities/address.entity';
 import { Review } from './reviews/entities/review.entity';
+import { Disease } from './diseases/entities/disease.entity';
 
 @Module({
   imports: [
@@ -52,12 +56,14 @@ import { Review } from './reviews/entities/review.entity';
           Order,
           Address,
           Review,
+          Disease,
         ],
         synchronize: true,          // Tự tạo collection. Tắt trong production!
         useUnifiedTopology: true,
       }),
       inject: [ConfigService],
     }),
+    EmbeddingModule,
     CloudinaryModule,
     AuthModule,
     UsersModule,
@@ -71,6 +77,8 @@ import { Review } from './reviews/entities/review.entity';
     ManufacturersModule,
     DashboardModule,
     ReviewsModule,
+    ChatbotModule,
+    DiseasesModule,
   ],
   controllers: [AppController],
   providers: [

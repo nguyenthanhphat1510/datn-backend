@@ -1,6 +1,16 @@
 // src/orders/orders.controller.ts
 
-import { Controller, Post, Get, Patch, Body, Param, Query } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Get,
+  Patch,
+  Body,
+  Param,
+  Query,
+  Req,
+} from '@nestjs/common';
+import type { Request } from 'express';
 import { OrdersService } from './orders.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
@@ -33,6 +43,57 @@ export class OrdersController {
   @Get()
   findMyOrders(@CurrentUser() user: { userId: string }) {
     return this.ordersService.findAllByUser(user.userId);
+  }
+
+  /**
+   * POST /orders/:id/vnpay-url
+   * Sinh URL thanh toán VNPay cho 1 đơn hàng (đơn phải là VNPAY, chưa trả).
+   */
+  @Post(':id/vnpay-url')
+  getVnpayUrl(
+    @CurrentUser() user: { userId: string },
+    @Param('id') id: string,
+    @Req() req: Request,
+  ) {
+    const ipAddr =
+      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+      req.socket?.remoteAddress ||
+      '127.0.0.1';
+    return this.ordersService.getVnpayUrlForOrder(user.userId, id, ipAddr);
+  }
+
+  /**
+   * GET /orders/vnpay-return
+   * VNPay redirect khách về đây (không kèm JWT → @Public).
+   * Verify chữ ký và cập nhật trạng thái thanh toán của đơn.
+   */
+  @Public()
+  @Get('vnpay-return')
+  vnpayReturn(@Query() query: Record<string, any>) {
+    return this.ordersService.handleVnpayReturn(query);
+  }
+
+  /**
+   * POST /orders/:id/momo-url
+   * Gọi MoMo tạo giao dịch, trả URL thanh toán (đơn phải là MOMO, chưa trả).
+   */
+  @Post(':id/momo-url')
+  getMomoUrl(
+    @CurrentUser() user: { userId: string },
+    @Param('id') id: string,
+  ) {
+    return this.ordersService.getMomoUrlForOrder(user.userId, id);
+  }
+
+  /**
+   * GET /orders/momo-return
+   * MoMo redirect khách về đây (không kèm JWT → @Public).
+   * Verify chữ ký và cập nhật trạng thái thanh toán của đơn.
+   */
+  @Public()
+  @Get('momo-return')
+  momoReturn(@Query() query: Record<string, any>) {
+    return this.ordersService.handleMomoReturn(query);
   }
 
   /**

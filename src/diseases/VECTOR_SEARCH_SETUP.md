@@ -11,6 +11,7 @@ chạy được, **bắt buộc** phải tạo một Vector Search Index trên A
 ## Thông số đã chốt (phải khớp với code)
 
 | Thông số | Giá trị | Khai báo ở đâu trong code |
+
 |---|---|---|
 | Model embedding | `gemini-embedding-001` | `EMBEDDING_MODEL` — embedding.service.ts |
 | Số chiều | **768** | `EMBEDDING_DIM` — embedding.service.ts |
@@ -57,3 +58,53 @@ chạy được, **bắt buộc** phải tạo một Vector Search Index trên A
 - Atlas tier **M0 (free)** có hỗ trợ Vector Search.
 - Nếu đổi `EMBEDDING_DIM` trong code, phải xóa & tạo lại index với `numDimensions` mới,
   đồng thời re-embed lại toàn bộ bệnh (lưu lại trong admin).
+
+---
+
+# Thiết lập Atlas Vector Search cho collection `products`
+
+Nhánh `san_pham` của chatbot dùng Vector Search trên **collection `products`** để tìm
+sản phẩm gần nghĩa với câu hỏi mua hàng ("có thuốc nào trị đạo ôn", "phân bón NPK").
+Embedding của sản phẩm được sinh từ `name + description + usageInstructions + tên các
+bệnh mà SP trị` — nhờ ghép tên bệnh nên câu hỏi theo tên bệnh vẫn match được dù tên
+sản phẩm không chứa tên bệnh.
+
+## Thông số (phải khớp với code)
+
+| Thông số | Giá trị | Khai báo ở đâu trong code |
+|---|---|---|
+| Model embedding | `gemini-embedding-001` | `EMBEDDING_MODEL` — embedding.service.ts |
+| Số chiều | **768** | `EMBEDDING_DIM` — embedding.service.ts |
+| Hàm khoảng cách | `cosine` | (vector đã được L2-normalize) |
+| Tên index | `product_vector_index` | `PRODUCT_VECTOR_INDEX` — chatbot.service.ts |
+| Field chứa vector | `embedding` | product.entity.ts |
+
+## Các bước tạo index
+
+Giống hệt phần `diseases` ở trên, nhưng:
+- Collection: `products`
+- Index Name: `product_vector_index`
+- JSON định nghĩa **giống y hệt** (path `embedding`, 768 chiều, cosine):
+
+```json
+{
+  "fields": [
+    {
+      "type": "vector",
+      "path": "embedding",
+      "numDimensions": 768,
+      "similarity": "cosine"
+    }
+  ]
+}
+```
+
+## Sau khi tạo
+
+- Sản phẩm **tạo/sửa qua admin** sẽ tự sinh `embedding`.
+- Sản phẩm **đã tạo trước khi có tính năng** sẽ có `embedding: []` → **chạy backfill
+  một lần**: gọi `POST /products/reembed-all` (sinh lại embedding cho toàn bộ SP). Trả
+  về `{ total, embedded }`.
+- Khi admin sửa liên kết bệnh–thuốc (`recommendedProductIds` của một bệnh), các SP
+  được thêm/bỏ sẽ **tự re-embed** để cập nhật tên bệnh trong vector.
+- Thử: vào chatbot, hỏi "có thuốc nào trị đạo ôn không" → bot trả các sản phẩm gợi ý.

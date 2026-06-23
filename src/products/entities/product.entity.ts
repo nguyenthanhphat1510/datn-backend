@@ -48,6 +48,13 @@ export class Product {
   @Column({ default: true })
   isActive: boolean;
 
+  // Vector embedding (gemini-embedding-001, 768 chiều) sinh từ name + description +
+  // usageInstructions + tên các bệnh mà sản phẩm này trị. Dùng cho Atlas Vector
+  // Search ở nhánh san_pham của chatbot. Cập nhật khi tạo/sửa SP, hoặc khi liên kết
+  // bệnh-thuốc (Disease.recommendedProductIds) thay đổi. Không trả về API công khai.
+  @Column({ type: 'array', default: [] })
+  embedding: number[];
+
   // Điểm đánh giá trung bình (0..5) — denormalize từ collection reviews để đọc nhanh
   @Column({ type: 'double', default: 0 })
   averageRating: number;

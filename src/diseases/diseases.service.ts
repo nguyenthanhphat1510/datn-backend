@@ -11,6 +11,7 @@ import { Disease } from './entities/disease.entity';
 import { CreateDiseaseDto } from './dto/create-disease.dto';
 import { UpdateDiseaseDto } from './dto/update-disease.dto';
 import { EmbeddingService } from '../common/embedding/embedding.service';
+import { ProductsService } from '../products/products.service';
 
 /** Sinh slug từ tên tiếng Việt: "Đạo ôn lá" -> "dao-on-la" */
 function slugify(input: string): string {
@@ -29,7 +30,35 @@ export class DiseasesService {
     @InjectRepository(Disease)
     private diseasesRepository: MongoRepository<Disease>,
     private readonly embeddingService: EmbeddingService,
+    private readonly productsService: ProductsService,
   ) {}
+
+  /**
+   * Khi liên kết bệnh-thuốc đổi, embedding của các SP được thêm/bỏ phải sinh lại
+   * để phản ánh đúng "trị bệnh gì". Re-embed phần đối xứng (SP có ở list này nhưng
+   * không có ở list kia). Bọc try/catch để lỗi đồng bộ không chặn việc lưu bệnh.
+   */
+  private async syncProductEmbeddings(
+    oldIds: string[],
+    newIds: string[],
+  ): Promise<void> {
+    const oldSet = new Set(oldIds);
+    const newSet = new Set(newIds);
+    const affected = [
+      ...newIds.filter((id) => !oldSet.has(id)), // SP mới được gắn
+      ...oldIds.filter((id) => !newSet.has(id)), // SP bị bỏ ra
+    ];
+    for (const productId of affected) {
+      try {
+        await this.productsService.reEmbed(productId);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[Diseases] Đồng bộ embedding SP ${productId} thất bại: ${msg}`,
+        );
+      }
+    }
+  }
 
   /**
    * Gộp các trường text thành một đoạn để sinh embedding. Đưa name + symptoms +
@@ -79,15 +108,21 @@ export class DiseasesService {
       this.buildEmbeddingText({ name: dto.name, symptoms, description: dto.description }),
     );
 
+    const recommendedProductIds = dto.recommendedProductIds ?? [];
     const disease = this.diseasesRepository.create({
       ...dto,
       slug,
       symptoms,
-      recommendedProductIds: dto.recommendedProductIds ?? [],
+      recommendedProductIds,
       isActive: dto.isActive ?? true,
       embedding,
     });
-    return this.stripEmbedding(await this.diseasesRepository.save(disease));
+    const saved = await this.diseasesRepository.save(disease);
+
+    // SP vừa được gắn vào bệnh mới này → re-embed để vector SP có tên bệnh.
+    await this.syncProductEmbeddings([], recommendedProductIds);
+
+    return this.stripEmbedding(saved);
   }
 
   /** Lấy danh sách */
@@ -149,6 +184,9 @@ export class DiseasesService {
       }
     }
 
+    // Giữ list SP gợi ý CŨ trước khi Object.assign ghi đè, để diff đồng bộ embedding.
+    const oldProductIds = [...(disease.recommendedProductIds ?? [])];
+
     Object.assign(disease, dto);
 
     // Chỉ sinh lại embedding khi đổi một trong các trường text cấu thành vector,
@@ -167,7 +205,18 @@ export class DiseasesService {
       );
     }
 
-    return this.stripEmbedding(await this.diseasesRepository.save(disease));
+    const saved = await this.diseasesRepository.save(disease);
+
+    // Nếu danh sách SP gợi ý đổi, re-embed các SP được thêm/bỏ để vector SP cập
+    // nhật tên bệnh. Ngoài ra nếu chỉ TÊN bệnh đổi, các SP đang gắn cũng cần cập
+    // nhật (vì embedding SP chứa tên bệnh) → re-embed toàn bộ SP đang gắn.
+    if (dto.recommendedProductIds !== undefined) {
+      await this.syncProductEmbeddings(oldProductIds, disease.recommendedProductIds);
+    } else if (dto.name !== undefined) {
+      await this.syncProductEmbeddings([], disease.recommendedProductIds ?? []);
+    }
+
+    return this.stripEmbedding(saved);
   }
 
   /** Ẩn (soft delete) */

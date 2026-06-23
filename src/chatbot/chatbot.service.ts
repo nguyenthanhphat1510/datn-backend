@@ -19,6 +19,22 @@ import {
 // Tên Vector Search Index tạo trên Atlas cho collection diseases (xem hướng dẫn).
 const DISEASE_VECTOR_INDEX = 'disease_vector_index';
 
+// Tên Vector Search Index trên Atlas cho collection products (nhánh san_pham).
+const PRODUCT_VECTOR_INDEX = 'product_vector_index';
+
+// Ngưỡng cosine SÀN để loại câu lạc đề. Đo thực tế: câu không liên quan ("có bán
+// máy bay không") cho điểm nền ~0.77; câu hỏi SP hợp lệ cho SP đúng ~0.85-0.89.
+// Chọn 0.8 để cắt vùng lạc đề.
+const PRODUCT_MIN_SCORE = 0.8;
+
+// Khoảng cách điểm tối đa so với SP khớp nhất (top). gemini-embedding dồn điểm
+// trong dải hẹp nên SP nhiễu (vd phân bón lọt vào câu hỏi trị bệnh) thường thấp
+// hơn top một chút — chỉ giữ SP có điểm >= topScore - GAP để loại nhiễu này.
+const PRODUCT_SCORE_GAP = 0.04;
+
+// Số sản phẩm tối đa gợi ý cho một câu hỏi (khớp lưới 2 cột ở frontend).
+const PRODUCT_LIMIT = 4;
+
 // Ngưỡng cosine tối thiểu để coi là "có khả năng đúng bệnh". Dưới ngưỡng → coi
 // như không tìm thấy (tránh vector search luôn trả top-1 kể cả câu lạc đề).
 // gemini-embedding-001 cho điểm nền cao (~0.77 cả với câu lạc đề), trong khi câu
@@ -74,6 +90,16 @@ Yêu cầu:
 - Nếu khớp: trả lời ngắn gọn, thân thiện bằng tiếng Việt: nêu tên bệnh nghi ngờ và mô tả/đặc điểm nhận biết ngắn gọn.
 - TUYỆT ĐỐI KHÔNG liệt kê tên thuốc hay giá tiền trong câu trả lời. Nếu context cho biết CÓ thuốc gợi ý, chỉ cần kết bằng câu mời người dùng tham khảo các sản phẩm gợi ý hiển thị bên dưới.
 - Văn phong tự nhiên, không dùng JSON, không markdown phức tạp. Tối đa khoảng 4-6 câu.`;
+
+// Hướng dẫn Gemini viết câu dẫn dắt cho nhánh san_pham. Sản phẩm tìm được sẽ render
+// thành thẻ riêng ở FE — Gemini KHÔNG liệt kê tên/giá trong văn bản.
+const RECOMMEND_INSTRUCTION = `Bạn là trợ lý bán hàng của TP Agri (cửa hàng vật tư nông nghiệp cho cây lúa).
+Người dùng đang hỏi/tìm sản phẩm (thuốc, phân bón). Hệ thống đã tìm được một số sản phẩm phù hợp và sẽ hiển thị thành thẻ bên dưới.
+Yêu cầu:
+- Viết 1-3 câu tiếng Việt thân thiện mời người dùng tham khảo các sản phẩm gợi ý hiển thị bên dưới.
+- TUYỆT ĐỐI KHÔNG liệt kê tên sản phẩm hay giá tiền trong câu trả lời (đã có thẻ riêng).
+- Có thể nhắc người dùng bấm vào sản phẩm để xem chi tiết.
+- Văn phong tự nhiên, không JSON, không markdown phức tạp.`;
 
 // Bỏ dấu tiếng Việt + viết thường để luật từ khóa bắt được cả câu không dấu.
 function normalize(text: string): string {
@@ -221,18 +247,15 @@ export class ChatbotService {
     // Lớp 1: luật từ khóa — câu rõ ràng được gán intent ngay, không tốn request Gemini.
     const ruleIntent = lastUser ? this.ruleClassify(lastUser) : null;
     if (ruleIntent) {
-      const diag =
-        ruleIntent === 'trieu_chung' && lastUser
-          ? await this.handleTrieuChung(lastUser)
-          : null;
+      const branch = await this.runIntentBranch(ruleIntent, lastUser);
       return {
         intent: ruleIntent,
         confidence: 1,
         reason: 'Khớp luật từ khóa',
-        reply: diag ? diag.reply : INTENT_LABEL[ruleIntent],
+        reply: branch.reply ?? INTENT_LABEL[ruleIntent],
         source: 'rule',
-        ...(diag && diag.products.length ? { products: diag.products } : {}),
-        ...(diag?.diagnosis ? { diagnosis: diag.diagnosis } : {}),
+        ...(branch.products?.length ? { products: branch.products } : {}),
+        ...(branch.diagnosis ? { diagnosis: branch.diagnosis } : {}),
       };
     }
 
@@ -240,20 +263,44 @@ export class ChatbotService {
     const { intent, confidence, reason, source } =
       await this.classifyIntent(messages);
 
-    // Nhánh trieu_chung: chẩn đoán thật bằng RAG (vector search + Gemini diễn đạt).
-    const diag =
-      intent === 'trieu_chung' && lastUser
-        ? await this.handleTrieuChung(lastUser)
-        : null;
+    const branch = await this.runIntentBranch(intent, lastUser);
     return {
       intent,
       confidence,
       reason,
-      reply: diag ? diag.reply : INTENT_LABEL[intent],
+      reply: branch.reply ?? INTENT_LABEL[intent],
       source,
-      ...(diag && diag.products.length ? { products: diag.products } : {}),
-      ...(diag?.diagnosis ? { diagnosis: diag.diagnosis } : {}),
+      ...(branch.products?.length ? { products: branch.products } : {}),
+      ...(branch.diagnosis ? { diagnosis: branch.diagnosis } : {}),
     };
+  }
+
+  /**
+   * Thực thi nhánh xử lý theo intent. Trả về phần dữ liệu để ghép vào ChatResult.
+   * Nhánh chưa triển khai (ky_thuat, don_hang, khac) trả {} → dùng INTENT_LABEL.
+   */
+  private async runIntentBranch(
+    intent: Intent,
+    lastUser: string | undefined,
+  ): Promise<{
+    reply?: string;
+    products?: ChatProduct[];
+    diagnosis?: Diagnosis;
+  }> {
+    if (!lastUser) return {};
+    if (intent === 'trieu_chung') {
+      const diag = await this.handleTrieuChung(lastUser);
+      return {
+        reply: diag.reply,
+        products: diag.products,
+        diagnosis: diag.diagnosis,
+      };
+    }
+    if (intent === 'san_pham') {
+      const res = await this.handleSanPham(lastUser);
+      return { reply: res.reply, products: res.products };
+    }
+    return {};
   }
 
   /* ─────────────────────────────────────────
@@ -303,8 +350,12 @@ export class ChatbotService {
       products,
     );
 
-    // Map sang thẻ sản phẩm gọn cho FE render.
-    const cards: ChatProduct[] = products.map((p) => ({
+    return { reply, products: this.toProductCards(products), diagnosis };
+  }
+
+  /** Map Product (DB) → ChatProduct (thẻ gọn cho FE). Dùng chung cho mọi nhánh. */
+  private toProductCards(products: Product[]): ChatProduct[] {
+    return products.map((p) => ({
       id: p._id.toString(),
       name: p.name,
       price: p.salePrice ?? p.price,
@@ -314,8 +365,6 @@ export class ChatbotService {
       rating: p.averageRating ?? 0,
       reviewCount: p.reviewCount ?? 0,
     }));
-
-    return { reply, products: cards, diagnosis };
   }
 
   /**
@@ -472,6 +521,139 @@ ${medsHint}`;
       ? '\n\nBạn tham khảo các sản phẩm gợi ý bên dưới nhé.'
       : '';
     return `${intro}${desc}${meds}`;
+  }
+
+  /* ─────────────────────────────────────────
+     Nhánh san_pham — tìm sản phẩm theo ngữ nghĩa
+     Retrieval: Atlas Vector Search trên products.embedding (embedding SP chứa cả
+     name + công dụng + tên bệnh trị, nên khớp được cả câu hỏi theo tên bệnh).
+     Generation: Gemini viết câu dẫn dắt + đính kèm thẻ sản phẩm.
+  ───────────────────────────────────────── */
+
+  /**
+   * Tìm sản phẩm phù hợp với câu hỏi mua hàng.
+   * 1) Embedding câu hỏi → 2) vector search top-N sản phẩm → 3) Gemini viết câu
+   * dẫn dắt. Không trả diagnosis (người dùng đang hỏi mua, không nhờ chẩn đoán).
+   */
+  private async handleSanPham(
+    userText: string,
+  ): Promise<{ reply: string; products: ChatProduct[] }> {
+    const products = await this.findBestProducts(userText, PRODUCT_LIMIT);
+
+    if (products.length === 0) {
+      return {
+        reply:
+          'Mình chưa tìm thấy sản phẩm phù hợp với yêu cầu này. Bạn thử nói rõ hơn ' +
+          'tên loại thuốc/phân bón hoặc bệnh cần trị, hoặc bấm "Liên hệ nhân viên" ' +
+          'để được tư vấn trực tiếp nhé.',
+        products: [],
+      };
+    }
+
+    const reply = await this.composeRecommendReply(userText, products);
+    return { reply, products: this.toProductCards(products) };
+  }
+
+  /**
+   * Atlas Vector Search trên products: embed câu hỏi rồi tìm các SP gần nghĩa nhất
+   * (đang active, trên ngưỡng). Trả [] nếu chưa cấu hình embedding hoặc lỗi.
+   */
+  private async findBestProducts(
+    userText: string,
+    limit: number,
+  ): Promise<Product[]> {
+    if (!this.embeddingService.enabled) return [];
+
+    let queryVector: number[];
+    try {
+      queryVector = await this.embeddingService.embedQuery(userText);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Embedding câu hỏi SP thất bại: ${msg}`);
+      return [];
+    }
+    if (queryVector.length !== EMBEDDING_DIM) return [];
+
+    try {
+      const results = (await this.productsRepository
+        .aggregate([
+          {
+            $vectorSearch: {
+              index: PRODUCT_VECTOR_INDEX,
+              path: 'embedding',
+              queryVector,
+              numCandidates: 100,
+              limit,
+            },
+          },
+          {
+            $project: {
+              name: 1,
+              price: 1,
+              salePrice: 1,
+              images: 1,
+              averageRating: 1,
+              reviewCount: 1,
+              isActive: 1,
+              score: { $meta: 'vectorSearchScore' },
+            },
+          },
+        ])
+        .toArray()) as Array<Product & { score: number }>;
+
+      // Lọc 1: chỉ SP đang active và trên ngưỡng sàn (loại câu lạc đề).
+      const candidates = results.filter(
+        (p) => p.isActive !== false && p.score >= PRODUCT_MIN_SCORE,
+      );
+      if (candidates.length === 0) return [];
+
+      // Lọc 2: loại SP nhiễu rớt xa SP khớp nhất (results đã sắp theo score giảm dần).
+      const topScore = candidates[0].score;
+      return candidates.filter((p) => p.score >= topScore - PRODUCT_SCORE_GAP);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `Vector search SP thất bại (đã tạo index "${PRODUCT_VECTOR_INDEX}" trên Atlas chưa?): ${msg}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Gemini viết câu dẫn dắt cho danh sách SP tìm được. Không liệt kê tên/giá (đã
+   * render thành thẻ). Fallback câu cố định nếu Gemini lỗi/rỗng.
+   */
+  private async composeRecommendReply(
+    userText: string,
+    products: Product[],
+  ): Promise<string> {
+    try {
+      const response = await this.ai!.models.generateContent({
+        model: MODEL,
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: `Người dùng hỏi: "${userText}"\n\nĐã tìm được ${products.length} sản phẩm phù hợp (hiển thị thành thẻ bên dưới).`,
+              },
+            ],
+          },
+        ],
+        config: {
+          systemInstruction: RECOMMEND_INSTRUCTION,
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+      });
+
+      const reply = (response.text ?? '').trim();
+      if (reply) return reply;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Diễn đạt gợi ý SP thất bại: ${msg}`);
+    }
+
+    return 'Mình tìm được một vài sản phẩm phù hợp, bạn tham khảo các gợi ý bên dưới nhé. Bấm vào sản phẩm để xem chi tiết.';
   }
 
   /**

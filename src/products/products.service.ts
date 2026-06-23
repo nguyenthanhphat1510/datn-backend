@@ -7,9 +7,11 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { MongoRepository } from 'typeorm';
 import { ObjectId } from 'mongodb';
 import { Product } from './entities/product.entity';
+import { Disease } from '../diseases/entities/disease.entity';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
+import { EmbeddingService } from '../common/embedding/embedding.service';
 
 export interface ProductFilter {
   categoryId?: string;
@@ -29,7 +31,10 @@ export class ProductsService {
   constructor(
     @InjectRepository(Product)
     private productsRepository: MongoRepository<Product>,
+    @InjectRepository(Disease)
+    private diseasesRepository: MongoRepository<Disease>,
     private readonly cloudinaryService: CloudinaryService,
+    private readonly embeddingService: EmbeddingService,
   ) {}
 
   /**
@@ -49,18 +54,92 @@ export class ProductsService {
     }
   }
 
+  /**
+   * Tìm tên các bệnh mà sản phẩm này trị (lấy từ Disease.recommendedProductIds chứa
+   * id của SP). Dùng để bồi ngữ nghĩa "trị bệnh gì" vào embedding của sản phẩm,
+   * nhờ đó câu hỏi theo tên bệnh ("thuốc trị đạo ôn") match được dù tên SP không
+   * chứa tên bệnh.
+   */
+  private async findRelatedDiseaseNames(productId: string): Promise<string[]> {
+    try {
+      const diseases = await this.diseasesRepository.find({
+        where: { recommendedProductIds: productId } as any,
+      });
+      return diseases.map((d) => d.name).filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Gộp các trường text + tên bệnh liên quan thành một đoạn để sinh embedding.
+   * Đưa name + description + usageInstructions + tên bệnh trị vào cùng để vector
+   * phản ánh đầy đủ "ngữ nghĩa" của sản phẩm (công dụng + trị bệnh gì).
+   */
+  private buildEmbeddingText(p: {
+    name?: string;
+    description?: string;
+    usageInstructions?: string;
+    diseaseNames?: string[];
+  }): string {
+    return [
+      p.name,
+      p.description,
+      p.usageInstructions,
+      (p.diseaseNames ?? []).join('. '),
+    ]
+      .filter(Boolean)
+      .join('. ')
+      .trim();
+  }
+
+  /**
+   * Sinh embedding cho sản phẩm. Bọc try/catch để lỗi embedding (vd hết quota)
+   * KHÔNG chặn việc lưu sản phẩm — chỉ log cảnh báo, embedding để rỗng và có thể
+   * tái tạo sau (qua reEmbed / backfill).
+   */
+  private async safeEmbed(text: string): Promise<number[]> {
+    if (!text || !this.embeddingService.enabled) return [];
+    try {
+      return await this.embeddingService.embedDocument(text);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[Products] Sinh embedding thất bại, lưu với vector rỗng: ${msg}`,
+      );
+      return [];
+    }
+  }
+
+  /** Loại bỏ field embedding trước khi trả về API công khai (768 số, vô nghĩa với client). */
+  private stripEmbedding(p: Product): Product {
+    const { embedding: _embedding, ...rest } = p;
+    return rest as Product;
+  }
+
   /** Tạo sản phẩm mới */
   async create(createProductDto: CreateProductDto): Promise<Product> {
     this.validateSalePrice(createProductDto.salePrice, createProductDto.price);
+
+    // SP mới chưa có id nên chưa thể tra bệnh liên quan; embedding lúc này dựa trên
+    // text của SP. Khi admin gắn SP vào bệnh, DiseasesService sẽ gọi reEmbed bổ sung.
+    const embedding = await this.safeEmbed(
+      this.buildEmbeddingText({
+        name: createProductDto.name,
+        description: createProductDto.description,
+        usageInstructions: createProductDto.usageInstructions,
+      }),
+    );
 
     // TypeORM Mongo không áp @Column default cho field bị undefined → set explicit
     const product = this.productsRepository.create({
       ...createProductDto,
       salePrice: createProductDto.salePrice ?? null,
       isActive: createProductDto.isActive ?? true,
+      embedding,
     });
     product.images = [];
-    return this.productsRepository.save(product);
+    return this.stripEmbedding(await this.productsRepository.save(product));
   }
 
   /** Lấy danh sách sản phẩm với filter và phân trang */
@@ -101,10 +180,14 @@ export class ProductsService {
       order: { createdAt: 'DESC' } as any,
     });
 
-    return { data, total, page, limit };
+    // Bỏ embedding khỏi response: nặng (768 số/SP) và vô nghĩa với client.
+    return { data: data.map((p) => this.stripEmbedding(p)), total, page, limit };
   }
 
-  /** Lấy 1 sản phẩm theo ID */
+  /**
+   * Lấy 1 sản phẩm theo ID — TRẢ NGUYÊN (có embedding). Dùng cho các service nội bộ
+   * (cart, order, reviews...). Controller công khai dùng findOnePublic.
+   */
   async findOne(id: string): Promise<Product> {
     if (!ObjectId.isValid(id)) {
       throw new BadRequestException('ID sản phẩm không hợp lệ');
@@ -121,6 +204,11 @@ export class ProductsService {
     return product;
   }
 
+  /** Như findOne nhưng đã bỏ embedding — dùng cho controller GET công khai. */
+  async findOnePublic(id: string): Promise<Product> {
+    return this.stripEmbedding(await this.findOne(id));
+  }
+
   /** Cập nhật sản phẩm */
   async update(id: string, updateProductDto: UpdateProductDto): Promise<Product> {
     const product = await this.findOne(id); // sẽ throw nếu không tồn tại
@@ -134,7 +222,76 @@ export class ProductsService {
     this.validateSalePrice(finalSalePrice, finalPrice);
 
     Object.assign(product, updateProductDto);
-    return this.productsRepository.save(product);
+
+    // Chỉ sinh lại embedding khi đổi một trong các trường text cấu thành vector,
+    // để tránh gọi API thừa (vd chỉ đổi giá/tồn kho thì không cần re-embed).
+    const textChanged =
+      updateProductDto.name !== undefined ||
+      updateProductDto.description !== undefined ||
+      updateProductDto.usageInstructions !== undefined;
+    if (textChanged) {
+      const diseaseNames = await this.findRelatedDiseaseNames(id);
+      product.embedding = await this.safeEmbed(
+        this.buildEmbeddingText({
+          name: product.name,
+          description: product.description,
+          usageInstructions: product.usageInstructions,
+          diseaseNames,
+        }),
+      );
+    }
+
+    return this.stripEmbedding(await this.productsRepository.save(product));
+  }
+
+  /**
+   * Sinh lại embedding cho 1 sản phẩm theo dữ liệu hiện tại + tên bệnh liên quan.
+   * DiseasesService gọi method này khi liên kết bệnh-thuốc (recommendedProductIds)
+   * thay đổi, để embedding của SP luôn phản ánh đúng các bệnh nó trị.
+   */
+  async reEmbed(productId: string): Promise<void> {
+    if (!ObjectId.isValid(productId)) return;
+    const product = await this.productsRepository.findOne({
+      where: { _id: new ObjectId(productId) },
+    });
+    if (!product) return;
+
+    const diseaseNames = await this.findRelatedDiseaseNames(productId);
+    product.embedding = await this.safeEmbed(
+      this.buildEmbeddingText({
+        name: product.name,
+        description: product.description,
+        usageInstructions: product.usageInstructions,
+        diseaseNames,
+      }),
+    );
+    await this.productsRepository.save(product);
+  }
+
+  /**
+   * Backfill: sinh lại embedding cho TẤT CẢ sản phẩm hiện có. Chạy 1 lần sau khi
+   * thêm tính năng vector search để các SP cũ (chưa có embedding) tìm được.
+   */
+  async reEmbedAll(): Promise<{ total: number; embedded: number }> {
+    const products = await this.productsRepository.find();
+    let embedded = 0;
+    for (const product of products) {
+      const diseaseNames = await this.findRelatedDiseaseNames(
+        product._id.toString(),
+      );
+      const vector = await this.safeEmbed(
+        this.buildEmbeddingText({
+          name: product.name,
+          description: product.description,
+          usageInstructions: product.usageInstructions,
+          diseaseNames,
+        }),
+      );
+      product.embedding = vector;
+      await this.productsRepository.save(product);
+      if (vector.length) embedded++;
+    }
+    return { total: products.length, embedded };
   }
 
   /** Xóa mềm: set isActive = false */

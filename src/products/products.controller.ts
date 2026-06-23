@@ -89,13 +89,26 @@ export class ProductsController {
   }
 
   /**
+   * POST /products/reembed-all
+   * Backfill: sinh lại embedding cho toàn bộ sản phẩm — Admin.
+   * Chạy 1 lần sau khi bật tính năng vector search để SP cũ tìm được.
+   * Đặt TRƯỚC route :id để không bị bắt nhầm thành id.
+   */
+  // TODO: bật lại @Roles(UserRole.ADMIN) khi cô yêu cầu phân quyền
+  @Public()
+  @Post('reembed-all')
+  reEmbedAll() {
+    return this.productsService.reEmbedAll();
+  }
+
+  /**
    * GET /products/:id
    * Lấy chi tiết 1 sản phẩm — Public
    */
   @Public()
   @Get(':id')
   findOne(@Param('id') id: string) {
-    return this.productsService.findOne(id);
+    return this.productsService.findOnePublic(id);
   }
 
   /**

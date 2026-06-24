@@ -19,6 +19,7 @@ import { DashboardModule } from './dashboard/dashboard.module';
 import { ReviewsModule } from './reviews/reviews.module';
 import { ChatbotModule } from './chatbot/chatbot.module';
 import { DiseasesModule } from './diseases/diseases.module';
+import { TechniquesModule } from './techniques/techniques.module';
 import { EmbeddingModule } from './common/embedding/embedding.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { RolesGuard } from './auth/guards/roles.guard';
@@ -32,6 +33,7 @@ import { Order } from './orders/entities/order.entity';
 import { Address } from './addresses/entities/address.entity';
 import { Review } from './reviews/entities/review.entity';
 import { Disease } from './diseases/entities/disease.entity';
+import { TechniqueChunk } from './techniques/entities/technique-chunk.entity';
 
 @Module({
   imports: [
@@ -57,6 +59,7 @@ import { Disease } from './diseases/entities/disease.entity';
           Address,
           Review,
           Disease,
+          TechniqueChunk,
         ],
         synchronize: true,          // Tự tạo collection. Tắt trong production!
         useUnifiedTopology: true,
@@ -79,6 +82,7 @@ import { Disease } from './diseases/entities/disease.entity';
     ReviewsModule,
     ChatbotModule,
     DiseasesModule,
+    TechniquesModule,
   ],
   controllers: [AppController],
   providers: [

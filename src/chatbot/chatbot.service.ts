@@ -15,6 +15,7 @@ import {
   EmbeddingService,
   EMBEDDING_DIM,
 } from '../common/embedding/embedding.service';
+import { TechniquesService } from '../techniques/techniques.service';
 
 // Tên Vector Search Index tạo trên Atlas cho collection diseases (xem hướng dẫn).
 const DISEASE_VECTOR_INDEX = 'disease_vector_index';
@@ -47,6 +48,14 @@ const VECTOR_MIN_SCORE = 0.82;
 const SCORE_CONF_MIN = 0.82;
 const SCORE_CONF_MAX = 0.95;
 
+// Ngưỡng cosine SÀN cho nhánh ky_thuat (tìm đoạn tài liệu kỹ thuật). Chunk tài
+// liệu dài thường khớp thấp hơn câu triệu chứng ngắn → đặt thấp hơn (0.7) để
+// không bỏ sót. Tinh chỉnh sau khi đo score thực tế (xem log vector search).
+const TECHNIQUE_MIN_SCORE = 0.7;
+
+// Số đoạn tài liệu tối đa lấy làm context cho Gemini ở nhánh ky_thuat.
+const TECHNIQUE_LIMIT = 3;
+
 const MODEL = 'gemini-3.1-flash-lite';
 
 // 5 nhóm intent mà chatbot phân loại câu hỏi người dùng vào.
@@ -70,13 +79,36 @@ const INTENT_LABEL: Record<Intent, string> = {
 
 // Hướng dẫn Gemini phân loại câu hỏi vào đúng 1 trong 5 nhóm.
 const CLASSIFY_INSTRUCTION = `Bạn là bộ phân loại ý định (intent) cho chatbot nông nghiệp TP Agri (chuyên về cây lúa).
-Hãy đọc cuộc hội thoại và phân loại TIN NHẮN MỚI NHẤT của người dùng vào ĐÚNG MỘT nhóm:
-- ky_thuat: hỏi về kỹ thuật canh tác lúa (làm đất, gieo sạ, bón phân, tưới nước, mùa vụ...).
-- trieu_chung: mô tả triệu chứng/dấu hiệu bất thường trên cây lúa để nhờ đoán bệnh (vd "lá bị đốm nâu", "cây vàng lá").
-- san_pham: hỏi hoặc tìm sản phẩm để mua (thuốc, phân bón) — giá cả, công dụng, "có loại nào trị...".
-- don_hang: hỏi về đơn hàng hoặc giỏ hàng của chính người dùng (trạng thái giao, đã mua gì, giỏ hàng).
-- khac: chào hỏi, cảm ơn, hoặc câu ngoài phạm vi cây lúa / dịch vụ TP Agri.
-Trả về JSON gồm: intent (1 trong 5 giá trị trên), confidence (0..1 độ chắc chắn), reason (1 câu tiếng Việt giải thích vì sao chọn nhóm này).`;
+Nhiệm vụ: đọc cuộc hội thoại và phân loại TIN NHẮN MỚI NHẤT của người dùng vào ĐÚNG MỘT nhóm dưới đây.
+Dùng các tin nhắn trước đó làm ngữ cảnh khi tin mới nhất quá ngắn hoặc nối tiếp ý trước (vd "loại nào tốt hơn?", "vậy bón bao nhiêu?").
+
+Năm nhóm:
+- ky_thuat: hỏi CÁCH LÀM / quy trình kỹ thuật canh tác lúa (làm đất, chọn giống, ngâm ủ, gieo sạ, bón phân, tưới/quản lý nước, làm cỏ, phòng trừ sâu bệnh nói chung, thu hoạch, bảo quản, mùa vụ, liều lượng/thời điểm...).
+- trieu_chung: người dùng MÔ TẢ dấu hiệu bất thường trên cây lúa và muốn biết ĐÓ LÀ BỆNH GÌ (vd "lá có đốm nâu", "cây bị vàng lá lụi dần", "thân thối nhũn"). Trọng tâm là CHẨN ĐOÁN, chưa hỏi mua.
+- san_pham: người dùng muốn TÌM/MUA sản phẩm cụ thể (thuốc, phân bón) — hỏi giá, công dụng, còn hàng, "có loại nào trị...", "tư vấn phân bón".
+- don_hang: hỏi về ĐƠN HÀNG hoặc GIỎ HÀNG của chính người dùng (trạng thái giao, đã mua gì, mã đơn, giỏ hàng).
+- khac: chào hỏi, cảm ơn, tạm biệt, xin gặp nhân viên, hoặc câu NGOÀI phạm vi cây lúa / dịch vụ TP Agri.
+
+Quy tắc ưu tiên khi câu CHỒNG nhiều nhóm (xét từ trên xuống, gặp điều kiện đúng trước thì chọn ngay):
+1. Nếu hỏi về đơn/giỏ hàng của bản thân → don_hang.
+2. Nếu có ý ĐỊNH MUA hoặc HỎI THUỐC/PHÂN cụ thể (kể cả khi có nhắc tên bệnh, vd "có thuốc nào trị đạo ôn") → san_pham.
+3. Nếu chỉ MÔ TẢ triệu chứng để nhờ đoán bệnh, CHƯA hỏi mua → trieu_chung.
+4. Nếu hỏi cách làm/quy trình kỹ thuật → ky_thuat.
+5. Còn lại → khac.
+
+Phân biệt dễ nhầm:
+- "Lúa bị đốm nâu là bệnh gì?" → trieu_chung (nhờ đoán bệnh).
+- "Có thuốc nào trị đốm nâu không?" → san_pham (muốn mua thuốc).
+- "Bón phân cho lúa giai đoạn đẻ nhánh thế nào?" → ky_thuat (hỏi cách làm), KHÔNG phải san_pham dù có chữ "phân".
+
+Ví dụ:
+- "lúa đang trổ thì bón phân gì, bao nhiêu?" → ky_thuat
+- "lá lúa có vết hình thoi màu nâu" → trieu_chung
+- "giá thuốc trị rầy nâu bao nhiêu?" → san_pham
+- "đơn của tôi giao tới đâu rồi?" → don_hang
+- "chào shop" → khac
+
+Trả về JSON gồm: intent (1 trong 5 giá trị trên), confidence (0..1 độ chắc chắn), reason (1 câu tiếng Việt ngắn giải thích vì sao chọn nhóm này).`;
 
 // Hướng dẫn Gemini diễn đạt câu trả lời chẩn đoán bệnh (nhánh trieu_chung).
 // Chỉ được dùng dữ liệu bệnh trong context (RAG), không bịa thêm.
@@ -90,6 +122,17 @@ Yêu cầu:
 - Nếu khớp: trả lời ngắn gọn, thân thiện bằng tiếng Việt: nêu tên bệnh nghi ngờ và mô tả/đặc điểm nhận biết ngắn gọn.
 - TUYỆT ĐỐI KHÔNG liệt kê tên thuốc hay giá tiền trong câu trả lời. Nếu context cho biết CÓ thuốc gợi ý, chỉ cần kết bằng câu mời người dùng tham khảo các sản phẩm gợi ý hiển thị bên dưới.
 - Văn phong tự nhiên, không dùng JSON, không markdown phức tạp. Tối đa khoảng 4-6 câu.`;
+
+// Hướng dẫn Gemini trả lời câu hỏi kỹ thuật canh tác (nhánh ky_thuat) DỰA TRÊN
+// các đoạn tài liệu lấy được qua vector search (RAG). Chỉ dùng dữ liệu trong
+// context, không bịa — giống tinh thần DIAGNOSE_INSTRUCTION.
+const TECHNIQUE_INSTRUCTION = `Bạn là trợ lý nông nghiệp TP Agri, tư vấn kỹ thuật canh tác cây lúa.
+Bạn được cung cấp MỘT SỐ ĐOẠN TRÍCH từ tài liệu kỹ thuật (lấy từ cơ sở dữ liệu).
+Yêu cầu:
+- CHỈ dùng thông tin trong các đoạn tài liệu được cung cấp; KHÔNG bịa thêm.
+- Nếu các đoạn tài liệu KHÔNG chứa thông tin trả lời được câu hỏi, hãy nói thật là chưa có tài liệu về vấn đề này và khuyên người dùng hỏi rõ hơn hoặc liên hệ nhân viên — đừng gượng ép.
+- Nếu có: trả lời ngắn gọn, rõ ràng, thân thiện bằng tiếng Việt, tổng hợp lại từ tài liệu (không cần trích nguyên văn).
+- Văn phong tự nhiên, không JSON, không markdown phức tạp. Tối đa khoảng 4-6 câu.`;
 
 // Hướng dẫn Gemini viết câu dẫn dắt cho nhánh san_pham. Sản phẩm tìm được sẽ render
 // thành thẻ riêng ở FE — Gemini KHÔNG liệt kê tên/giá trong văn bản.
@@ -134,19 +177,24 @@ const KEYWORD_RULES: { intent: Intent; keywords: string[] }[] = [
     ],
   },
   // san_pham: có ý định mua / hỏi giá → thắng triệu chứng nếu cùng xuất hiện.
+  // Chỉ dùng cụm RÕ RÀNG; tránh từ quá rộng ('gia ', 'mua ') vì khớp nhầm
+  // "giá rét", "đánh giá", "mùa mưa"... → câu mơ hồ để Gemini phân loại.
   {
     intent: 'san_pham',
     keywords: [
       'gia bao nhieu',
       'bao nhieu tien',
-      'gia ',
-      'mua ',
+      'bao nhieu mot',
+      'gia cua',
       'co thuoc',
       'thuoc nao',
       'loai thuoc',
+      'co loai nao',
       'san pham',
       'con hang',
       'dat mua',
+      'muon mua',
+      'can mua',
       'tu van phan bon',
       'thuoc tri sau benh',
     ],
@@ -155,7 +203,36 @@ const KEYWORD_RULES: { intent: Intent; keywords: string[] }[] = [
   // chứng tự do để Gemini lo vì diễn đạt quá đa dạng, dễ bắt nhầm.
   {
     intent: 'trieu_chung',
-    keywords: ['chan doan benh', 'cay lua bi benh gi', 'la lua bi benh gi'],
+    keywords: [
+      'chan doan benh',
+      'cay lua bi benh gi',
+      'la lua bi benh gi',
+      'lua bi benh gi',
+      'la benh gi',
+    ],
+  },
+  // ky_thuat: hỏi cách làm / quy trình canh tác. Bắt các cụm rõ ràng để khỏi
+  // tốn request Gemini cho câu kỹ thuật phổ biến.
+  {
+    intent: 'ky_thuat',
+    keywords: [
+      'ky thuat',
+      'cach lam dat',
+      'lam dat',
+      'gieo sa',
+      'ngam u giong',
+      'chon giong',
+      'cach bon phan',
+      'bon phan cho lua',
+      'quan ly nuoc',
+      'tuoi nuoc',
+      'lam co',
+      'thu hoach',
+      'bao quan lua',
+      'mua vu',
+      'cach trong lua',
+      'cham soc lua',
+    ],
   },
   // khac: chào hỏi / cảm ơn / liên hệ.
   {
@@ -165,9 +242,7 @@ const KEYWORD_RULES: { intent: Intent; keywords: string[] }[] = [
       'chao shop',
       'chao ban',
       'hello',
-      'hi ',
       'cam on',
-      'cảm ơn',
       'tam biet',
       'lien he nhan vien',
       'gap nhan vien',
@@ -206,6 +281,9 @@ export interface ChatResult {
   products?: ChatProduct[];
   // Chỉ có ở nhánh trieu_chung khi vector search tìm được bệnh trên ngưỡng.
   diagnosis?: Diagnosis;
+  // Chỉ có ở nhánh ky_thuat: tên các tài liệu nguồn câu trả lời được lấy ra
+  // (để FE hiển thị "Nguồn: ...", giúp người dùng biết đây là dữ liệu thật, không bịa).
+  sources?: string[];
 }
 
 @Injectable()
@@ -216,6 +294,7 @@ export class ChatbotService {
   constructor(
     private readonly configService: ConfigService,
     private readonly embeddingService: EmbeddingService,
+    private readonly techniquesService: TechniquesService,
     @InjectRepository(Disease)
     private readonly diseasesRepository: MongoRepository<Disease>,
     @InjectRepository(Product)
@@ -224,7 +303,9 @@ export class ChatbotService {
     const apiKey = this.configService.get<string>('GEMINI_API_KEY');
     this.ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
     if (!this.ai) {
-      this.logger.warn('Thiếu GEMINI_API_KEY trong .env — chatbot sẽ không hoạt động');
+      this.logger.warn(
+        'Thiếu GEMINI_API_KEY trong .env — chatbot sẽ không hoạt động',
+      );
     }
   }
 
@@ -249,13 +330,16 @@ export class ChatbotService {
     if (ruleIntent) {
       const branch = await this.runIntentBranch(ruleIntent, lastUser);
       return {
+        // 0.9 (không phải 1): luật từ khóa nhanh nhưng không hoàn hảo bằng Gemini,
+        // tránh báo "chắc chắn tuyệt đối" cho trường hợp keyword khớp nhầm.
         intent: ruleIntent,
-        confidence: 1,
+        confidence: 0.9,
         reason: 'Khớp luật từ khóa',
         reply: branch.reply ?? INTENT_LABEL[ruleIntent],
         source: 'rule',
         ...(branch.products?.length ? { products: branch.products } : {}),
         ...(branch.diagnosis ? { diagnosis: branch.diagnosis } : {}),
+        ...(branch.sources?.length ? { sources: branch.sources } : {}),
       };
     }
 
@@ -272,6 +356,7 @@ export class ChatbotService {
       source,
       ...(branch.products?.length ? { products: branch.products } : {}),
       ...(branch.diagnosis ? { diagnosis: branch.diagnosis } : {}),
+      ...(branch.sources?.length ? { sources: branch.sources } : {}),
     };
   }
 
@@ -286,6 +371,7 @@ export class ChatbotService {
     reply?: string;
     products?: ChatProduct[];
     diagnosis?: Diagnosis;
+    sources?: string[];
   }> {
     if (!lastUser) return {};
     if (intent === 'trieu_chung') {
@@ -300,7 +386,112 @@ export class ChatbotService {
       const res = await this.handleSanPham(lastUser);
       return { reply: res.reply, products: res.products };
     }
+    if (intent === 'ky_thuat') {
+      const res = await this.handleKyThuat(lastUser);
+      return { reply: res.reply, sources: res.sources };
+    }
     return {};
+  }
+
+  /* ─────────────────────────────────────────
+     Nhánh ky_thuat — RAG kỹ thuật canh tác lúa
+     Retrieval: Atlas Vector Search trên technique_chunks (đoạn tài liệu admin upload).
+     Generation: Gemini tổng hợp câu trả lời CHỈ từ các đoạn tìm được, không bịa.
+  ───────────────────────────────────────── */
+
+  /**
+   * Trả lời câu hỏi kỹ thuật canh tác từ tài liệu đã nạp.
+   * 1) Embedding câu hỏi → 2) vector search top-N đoạn tài liệu → 3) Gemini tổng
+   * hợp câu trả lời (hoặc nói chưa có tài liệu nếu không tìm được đoạn liên quan).
+   */
+  private async handleKyThuat(
+    userText: string,
+  ): Promise<{ reply: string; sources?: string[] }> {
+    // Không có embedding (chưa cấu hình key) → không truy hồi được tài liệu.
+    if (!this.embeddingService.enabled) {
+      return { reply: this.kyThuatFallbackReply() };
+    }
+
+    let queryVector: number[];
+    try {
+      queryVector = await this.embeddingService.embedQuery(userText);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Embedding câu hỏi kỹ thuật thất bại: ${msg}`);
+      return { reply: this.kyThuatFallbackReply() };
+    }
+    if (queryVector.length !== EMBEDDING_DIM) {
+      return { reply: this.kyThuatFallbackReply() };
+    }
+
+    const chunks = await this.techniquesService.searchRelevant(
+      queryVector,
+      TECHNIQUE_LIMIT,
+      TECHNIQUE_MIN_SCORE,
+    );
+
+    // Không tìm được đoạn tài liệu nào đủ liên quan → trả lời an toàn, không bịa.
+    if (chunks.length === 0) {
+      return { reply: this.kyThuatFallbackReply() };
+    }
+
+    const reply = await this.composeTechniqueReply(userText, chunks);
+
+    // Tên tài liệu nguồn (distinct) để FE hiển thị "Nguồn: ..." — cho người dùng
+    // thấy câu trả lời lấy từ tài liệu thật, không phải AI bịa.
+    const sources = [...new Set(chunks.map((c) => c.docTitle))];
+    return { reply, sources };
+  }
+
+  /** Câu trả lời an toàn khi nhánh ky_thuat không có/không tìm được tài liệu. */
+  private kyThuatFallbackReply(): string {
+    return (
+      'Hiện mình chưa có tài liệu phù hợp để trả lời câu hỏi kỹ thuật này. ' +
+      'Bạn thử hỏi cụ thể hơn (giai đoạn sinh trưởng, loại đất, mùa vụ...) ' +
+      'hoặc bấm "Liên hệ nhân viên" để được hỗ trợ trực tiếp nhé.'
+    );
+  }
+
+  /**
+   * Gemini tổng hợp câu trả lời kỹ thuật từ các đoạn tài liệu tìm được (RAG).
+   * Context = nội dung các chunk; mô hình chỉ được dùng dữ liệu này, không bịa.
+   */
+  private async composeTechniqueReply(
+    userText: string,
+    chunks: { content: string; docTitle: string; score: number }[],
+  ): Promise<string> {
+    const context = chunks
+      .map((c, i) => `[Đoạn ${i + 1} — nguồn: ${c.docTitle}]\n${c.content}`)
+      .join('\n\n');
+
+    try {
+      const response = await this.ai!.models.generateContent({
+        model: MODEL,
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: `Người dùng hỏi: "${userText}"\n\nCÁC ĐOẠN TÀI LIỆU (chỉ dùng dữ liệu này):\n${context}`,
+              },
+            ],
+          },
+        ],
+        config: {
+          systemInstruction: TECHNIQUE_INSTRUCTION,
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+      });
+
+      const reply = (response.text ?? '').trim();
+      if (reply) return reply;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Diễn đạt câu trả lời kỹ thuật thất bại: ${msg}`);
+    }
+
+    // Fallback nếu Gemini lỗi/rỗng: trả nguyên đoạn tài liệu khớp nhất.
+    return `Theo tài liệu kỹ thuật, bạn tham khảo thông tin sau nhé:\n\n${chunks[0].content}`;
   }
 
   /* ─────────────────────────────────────────
@@ -314,9 +505,7 @@ export class ChatbotService {
    * 1) Embedding câu hỏi → 2) vector search top-1 bệnh → 3) lấy thuốc gợi ý
    * → 4) Gemini diễn đạt câu trả lời tự nhiên (hoặc từ chối nếu không khớp).
    */
-  private async handleTrieuChung(
-    userText: string,
-  ): Promise<{
+  private async handleTrieuChung(userText: string): Promise<{
     reply: string;
     products: ChatProduct[];
     diagnosis?: Diagnosis;
@@ -373,8 +562,7 @@ export class ChatbotService {
    * - level: nhãn mức độ để FE đổi màu (cao / trung bình / thấp).
    */
   private buildDiagnosis(disease: string, score: number): Diagnosis {
-    const ratio =
-      (score - SCORE_CONF_MIN) / (SCORE_CONF_MAX - SCORE_CONF_MIN);
+    const ratio = (score - SCORE_CONF_MIN) / (SCORE_CONF_MAX - SCORE_CONF_MIN);
     const clamped = Math.min(1, Math.max(0, ratio));
     const confidence = Math.round(60 + clamped * 39); // 60..99
 

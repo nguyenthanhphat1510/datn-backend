@@ -5,12 +5,15 @@ import { ChatbotService } from './chatbot.service';
 import { Disease } from '../diseases/entities/disease.entity';
 import { Product } from '../products/entities/product.entity';
 import { TechniquesModule } from '../techniques/techniques.module';
+import { DiseasesModule } from '../diseases/diseases.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Disease, Product]),
     // Cung cấp TechniquesService cho nhánh ky_thuat (RAG trên tài liệu kỹ thuật).
     TechniquesModule,
+    // Cung cấp DiseasePredictionService cho nhánh gửi ảnh (dự đoán bệnh từ ảnh).
+    DiseasesModule,
   ],
   controllers: [ChatbotController],
   providers: [ChatbotService],

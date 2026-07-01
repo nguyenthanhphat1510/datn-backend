@@ -11,6 +11,7 @@ import { Category } from './entities/category.entity';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 import { Product } from '../products/entities/product.entity';
+import { Subcategory } from '../subcategories/entities/subcategory.entity';
 
 /** Sinh slug từ tên tiếng Việt: "Phân bón" -> "phan-bon" */
 function slugify(input: string): string {
@@ -30,6 +31,8 @@ export class CategoriesService {
     private categoriesRepository: MongoRepository<Category>,
     @InjectRepository(Product)
     private productsRepository: MongoRepository<Product>,
+    @InjectRepository(Subcategory)
+    private subcategoriesRepository: MongoRepository<Subcategory>,
   ) {}
 
   /** Tạo danh mục mới */
@@ -117,15 +120,28 @@ export class CategoriesService {
     return this.categoriesRepository.save(category);
   }
 
-  /** Xóa cứng — chặn nếu còn sản phẩm liên kết */
+  /** Xóa cứng — chặn nếu còn sản phẩm hoặc danh mục con liên kết */
   async remove(id: string): Promise<{ message: string }> {
     const category = await this.findOne(id);
-    const count = await this.productsRepository.count({ categoryId: id } as any);
-    if (count > 0) {
+
+    const productCount = await this.productsRepository.count({
+      categoryId: id,
+    } as any);
+    if (productCount > 0) {
       throw new BadRequestException(
-        `Còn ${count} sản phẩm trong danh mục, hãy chuyển sản phẩm sang danh mục khác trước`,
+        `Còn ${productCount} sản phẩm trong danh mục, hãy chuyển sản phẩm sang danh mục khác trước`,
       );
     }
+
+    const subcategoryCount = await this.subcategoriesRepository.count({
+      categoryId: id,
+    } as any);
+    if (subcategoryCount > 0) {
+      throw new BadRequestException(
+        `Còn ${subcategoryCount} danh mục con trong danh mục, hãy xóa hoặc chuyển danh mục con sang danh mục khác trước`,
+      );
+    }
+
     await this.categoriesRepository.remove(category);
     return { message: 'Đã xóa danh mục thành công' };
   }

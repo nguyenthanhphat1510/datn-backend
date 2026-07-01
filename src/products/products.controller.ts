@@ -66,6 +66,7 @@ export class ProductsController {
     @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
     @Query('limit', new DefaultValuePipe(10), ParseIntPipe) limit: number,
     @Query('categoryId') categoryId?: string,
+    @Query('subcategoryId') subcategoryId?: string,
     @Query('search') search?: string,
     @Query('minPrice') minPrice?: string,
     @Query('maxPrice') maxPrice?: string,
@@ -79,6 +80,7 @@ export class ProductsController {
     return this.productsService.findAll(
       {
         categoryId,
+        subcategoryId,
         isActive,
         search,
         minPrice: minPrice ? parseFloat(minPrice) : undefined,

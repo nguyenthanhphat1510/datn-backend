@@ -12,6 +12,7 @@ import { CreateDiseaseDto } from './dto/create-disease.dto';
 import { UpdateDiseaseDto } from './dto/update-disease.dto';
 import { EmbeddingService } from '../common/embedding/embedding.service';
 import { ProductsService } from '../products/products.service';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
 
 /** Sinh slug từ tên tiếng Việt: "Đạo ôn lá" -> "dao-on-la" */
 function slugify(input: string): string {
@@ -31,6 +32,7 @@ export class DiseasesService {
     private diseasesRepository: MongoRepository<Disease>,
     private readonly embeddingService: EmbeddingService,
     private readonly productsService: ProductsService,
+    private readonly cloudinaryService: CloudinaryService,
   ) {}
 
   /**
@@ -170,6 +172,11 @@ export class DiseasesService {
     return disease;
   }
 
+  /** Như findBySlug nhưng đã bỏ embedding — dùng khi map kết quả dự đoán cho client. */
+  async findBySlugPublic(slug: string): Promise<Disease> {
+    return this.stripEmbedding(await this.findBySlug(slug));
+  }
+
   /** Cập nhật bệnh */
   async update(id: string, dto: UpdateDiseaseDto): Promise<Disease> {
     const disease = await this.findOne(id);
@@ -234,10 +241,42 @@ export class DiseasesService {
     return this.stripEmbedding(await this.diseasesRepository.save(disease));
   }
 
-  /** Xóa cứng */
+  /** Xóa cứng — dọn cả ảnh trên Cloudinary */
   async remove(id: string): Promise<{ message: string }> {
     const disease = await this.findOne(id);
+    if (disease.images?.length) {
+      await Promise.all(
+        disease.images.map((img) =>
+          this.cloudinaryService.deleteImage(img.publicId),
+        ),
+      );
+    }
     await this.diseasesRepository.remove(disease);
     return { message: 'Đã xóa bệnh thành công' };
+  }
+
+  /** Upload thêm 1 hoặc nhiều ảnh minh họa cho bệnh */
+  async addImages(id: string, files: Express.Multer.File[]): Promise<Disease> {
+    if (!files?.length) {
+      throw new BadRequestException('Chưa có file nào được upload');
+    }
+    const disease = await this.findOne(id);
+    const uploaded = await Promise.all(
+      files.map((f) => this.cloudinaryService.uploadImage(f, 'datn/diseases')),
+    );
+    disease.images = [...(disease.images ?? []), ...uploaded];
+    return this.stripEmbedding(await this.diseasesRepository.save(disease));
+  }
+
+  /** Xóa 1 ảnh khỏi bệnh (và khỏi Cloudinary) */
+  async removeImage(id: string, publicId: string): Promise<Disease> {
+    const disease = await this.findOne(id);
+    const existed = disease.images?.some((img) => img.publicId === publicId);
+    if (!existed) {
+      throw new NotFoundException(`Không tìm thấy ảnh với publicId: ${publicId}`);
+    }
+    await this.cloudinaryService.deleteImage(publicId);
+    disease.images = disease.images.filter((img) => img.publicId !== publicId);
+    return this.stripEmbedding(await this.diseasesRepository.save(disease));
   }
 }

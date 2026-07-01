@@ -43,14 +43,26 @@ export class CreateProductDto {
   @IsMongoId({ message: 'categoryId không hợp lệ' })
   categoryId: string;
 
-  // Ref đến Manufacturer._id (chuỗi ObjectId hợp lệ)
-  @IsOptional()
+  // Ref đến Subcategory._id — bắt buộc, phải thuộc categoryId ở trên
+  @IsString()
+  @IsNotEmpty({ message: 'Hãy chọn danh mục con' })
+  @IsMongoId({ message: 'subcategoryId không hợp lệ' })
+  subcategoryId: string;
+
+  // Ref đến Manufacturer._id (chuỗi ObjectId hợp lệ) — bắt buộc
+  @IsNotEmpty({ message: 'Hãy chọn nhà sản xuất' })
   @IsMongoId({ message: 'manufacturer không hợp lệ' })
-  manufacturer?: string;
+  manufacturer: string;
 
   @IsOptional()
   @IsString()
   usageInstructions?: string;
+
+  // Thành phần / hoạt chất (chuỗi tự do). Thuốc: hoạt chất + hàm lượng; phân bón:
+  // công thức NPK. Để trống nếu không áp dụng.
+  @IsOptional()
+  @IsString()
+  ingredients?: string;
 
   // Ảnh sản phẩm upload qua endpoint POST /products/:id/images sau khi tạo
 

@@ -8,6 +8,9 @@ import { MongoRepository } from 'typeorm';
 import { ObjectId } from 'mongodb';
 import { Product } from './entities/product.entity';
 import { Disease } from '../diseases/entities/disease.entity';
+import { Category } from '../categories/entities/category.entity';
+import { Subcategory } from '../subcategories/entities/subcategory.entity';
+import { Manufacturer } from '../manufacturers/entities/manufacturer.entity';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
@@ -15,6 +18,7 @@ import { EmbeddingService } from '../common/embedding/embedding.service';
 
 export interface ProductFilter {
   categoryId?: string;
+  subcategoryId?: string;
   isActive?: boolean;
   search?: string;       // Tìm theo tên
   minPrice?: number;
@@ -33,6 +37,12 @@ export class ProductsService {
     private productsRepository: MongoRepository<Product>,
     @InjectRepository(Disease)
     private diseasesRepository: MongoRepository<Disease>,
+    @InjectRepository(Subcategory)
+    private subcategoriesRepository: MongoRepository<Subcategory>,
+    @InjectRepository(Category)
+    private categoriesRepository: MongoRepository<Category>,
+    @InjectRepository(Manufacturer)
+    private manufacturersRepository: MongoRepository<Manufacturer>,
     private readonly cloudinaryService: CloudinaryService,
     private readonly embeddingService: EmbeddingService,
   ) {}
@@ -50,6 +60,71 @@ export class ProductsService {
     if (salePrice >= price) {
       throw new BadRequestException(
         'Giá khuyến mãi phải nhỏ hơn giá gốc',
+      );
+    }
+  }
+
+  /** Kiểm tra category hợp lệ: đúng định dạng, tồn tại và đang active. */
+  private async validateCategory(categoryId: string): Promise<void> {
+    if (!ObjectId.isValid(categoryId)) {
+      throw new BadRequestException('categoryId không hợp lệ');
+    }
+    const category = await this.categoriesRepository.findOne({
+      where: { _id: new ObjectId(categoryId) },
+    });
+    if (!category) {
+      throw new NotFoundException(
+        `Không tìm thấy danh mục với ID: ${categoryId}`,
+      );
+    }
+    if (!category.isActive) {
+      throw new BadRequestException('Danh mục đang bị ẩn');
+    }
+  }
+
+  /** Kiểm tra nhà sản xuất hợp lệ: đúng định dạng, tồn tại và đang active. */
+  private async validateManufacturer(manufacturerId: string): Promise<void> {
+    if (!ObjectId.isValid(manufacturerId)) {
+      throw new BadRequestException('manufacturer không hợp lệ');
+    }
+    const manufacturer = await this.manufacturersRepository.findOne({
+      where: { _id: new ObjectId(manufacturerId) },
+    });
+    if (!manufacturer) {
+      throw new NotFoundException(
+        `Không tìm thấy nhà sản xuất với ID: ${manufacturerId}`,
+      );
+    }
+    if (!manufacturer.isActive) {
+      throw new BadRequestException('Nhà sản xuất đang bị ẩn');
+    }
+  }
+
+  /**
+   * Kiểm tra subcategory hợp lệ: tồn tại, đang active, và thuộc đúng category cha
+   * (subcategory.categoryId === categoryId của sản phẩm). Chặn gán lệch cây phân loại.
+   */
+  private async validateSubcategory(
+    subcategoryId: string,
+    categoryId: string,
+  ): Promise<void> {
+    if (!ObjectId.isValid(subcategoryId)) {
+      throw new BadRequestException('subcategoryId không hợp lệ');
+    }
+    const subcategory = await this.subcategoriesRepository.findOne({
+      where: { _id: new ObjectId(subcategoryId) },
+    });
+    if (!subcategory) {
+      throw new NotFoundException(
+        `Không tìm thấy danh mục con với ID: ${subcategoryId}`,
+      );
+    }
+    if (!subcategory.isActive) {
+      throw new BadRequestException('Danh mục con đang bị ẩn');
+    }
+    if (subcategory.categoryId !== categoryId) {
+      throw new BadRequestException(
+        'Danh mục con không thuộc danh mục đã chọn',
       );
     }
   }
@@ -80,12 +155,14 @@ export class ProductsService {
     name?: string;
     description?: string;
     usageInstructions?: string;
+    ingredients?: string;
     diseaseNames?: string[];
   }): string {
     return [
       p.name,
       p.description,
       p.usageInstructions,
+      p.ingredients,
       (p.diseaseNames ?? []).join('. '),
     ]
       .filter(Boolean)
@@ -120,6 +197,12 @@ export class ProductsService {
   /** Tạo sản phẩm mới */
   async create(createProductDto: CreateProductDto): Promise<Product> {
     this.validateSalePrice(createProductDto.salePrice, createProductDto.price);
+    await this.validateCategory(createProductDto.categoryId);
+    await this.validateSubcategory(
+      createProductDto.subcategoryId,
+      createProductDto.categoryId,
+    );
+    await this.validateManufacturer(createProductDto.manufacturer);
 
     // SP mới chưa có id nên chưa thể tra bệnh liên quan; embedding lúc này dựa trên
     // text của SP. Khi admin gắn SP vào bệnh, DiseasesService sẽ gọi reEmbed bổ sung.
@@ -128,6 +211,7 @@ export class ProductsService {
         name: createProductDto.name,
         description: createProductDto.description,
         usageInstructions: createProductDto.usageInstructions,
+        ingredients: createProductDto.ingredients,
       }),
     );
 
@@ -147,7 +231,8 @@ export class ProductsService {
     filter: ProductFilter = {},
     pagination: PaginationOptions = {},
   ): Promise<{ data: Product[]; total: number; page: number; limit: number }> {
-    const { categoryId, isActive, search, minPrice, maxPrice } = filter;
+    const { categoryId, subcategoryId, isActive, search, minPrice, maxPrice } =
+      filter;
     const page = Math.max(1, pagination.page ?? 1);
     const limit = Math.min(100, Math.max(1, pagination.limit ?? 10));
     const skip = (page - 1) * limit;
@@ -157,6 +242,10 @@ export class ProductsService {
 
     if (categoryId) {
       where.categoryId = categoryId;
+    }
+
+    if (subcategoryId) {
+      where.subcategoryId = subcategoryId;
     }
 
     if (isActive !== undefined) {
@@ -221,6 +310,28 @@ export class ProductsService {
         : product.salePrice;
     this.validateSalePrice(finalSalePrice, finalPrice);
 
+    // Nếu đổi danh mục thì kiểm tra danh mục mới tồn tại + active.
+    if (updateProductDto.categoryId !== undefined) {
+      await this.validateCategory(updateProductDto.categoryId);
+    }
+
+    // Nếu đổi danh mục hoặc danh mục con, kiểm tra lại cặp cuối cùng để subcategory
+    // luôn thuộc đúng category cha (đồng thời kiểm subcategory tồn tại + active).
+    if (
+      updateProductDto.categoryId !== undefined ||
+      updateProductDto.subcategoryId !== undefined
+    ) {
+      const finalCategoryId = updateProductDto.categoryId ?? product.categoryId;
+      const finalSubcategoryId =
+        updateProductDto.subcategoryId ?? product.subcategoryId;
+      await this.validateSubcategory(finalSubcategoryId, finalCategoryId);
+    }
+
+    // Nếu đổi nhà sản xuất thì kiểm tra tồn tại + active.
+    if (updateProductDto.manufacturer !== undefined) {
+      await this.validateManufacturer(updateProductDto.manufacturer);
+    }
+
     Object.assign(product, updateProductDto);
 
     // Chỉ sinh lại embedding khi đổi một trong các trường text cấu thành vector,
@@ -228,7 +339,8 @@ export class ProductsService {
     const textChanged =
       updateProductDto.name !== undefined ||
       updateProductDto.description !== undefined ||
-      updateProductDto.usageInstructions !== undefined;
+      updateProductDto.usageInstructions !== undefined ||
+      updateProductDto.ingredients !== undefined;
     if (textChanged) {
       const diseaseNames = await this.findRelatedDiseaseNames(id);
       product.embedding = await this.safeEmbed(
@@ -236,6 +348,7 @@ export class ProductsService {
           name: product.name,
           description: product.description,
           usageInstructions: product.usageInstructions,
+          ingredients: product.ingredients,
           diseaseNames,
         }),
       );
@@ -262,6 +375,7 @@ export class ProductsService {
         name: product.name,
         description: product.description,
         usageInstructions: product.usageInstructions,
+        ingredients: product.ingredients,
         diseaseNames,
       }),
     );
@@ -284,6 +398,7 @@ export class ProductsService {
           name: product.name,
           description: product.description,
           usageInstructions: product.usageInstructions,
+          ingredients: product.ingredients,
           diseaseNames,
         }),
       );

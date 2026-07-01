@@ -16,6 +16,7 @@ import {
   EMBEDDING_DIM,
 } from '../common/embedding/embedding.service';
 import { TechniquesService } from '../techniques/techniques.service';
+import { DiseasePredictionService } from '../diseases/disease-prediction.service';
 
 // Tên Vector Search Index tạo trên Atlas cho collection diseases (xem hướng dẫn).
 const DISEASE_VECTOR_INDEX = 'disease_vector_index';
@@ -56,6 +57,11 @@ const TECHNIQUE_MIN_SCORE = 0.7;
 // Số đoạn tài liệu tối đa lấy làm context cho Gemini ở nhánh ky_thuat.
 const TECHNIQUE_LIMIT = 3;
 
+// Ngưỡng confidence tối thiểu của MODEL ẢNH (0..1) để khẳng định bệnh khi người
+// dùng gửi ảnh. Model luôn trả top-1 kể cả ảnh không phải lá lúa, nên dưới ngưỡng
+// này ta trả lời "chưa chắc chắn" thay vì khẳng định sai.
+const IMAGE_CONF_MIN = 0.5;
+
 const MODEL = 'gemini-3.1-flash-lite';
 
 // 5 nhóm intent mà chatbot phân loại câu hỏi người dùng vào.
@@ -63,6 +69,7 @@ export const INTENTS = [
   'ky_thuat',
   'trieu_chung',
   'san_pham',
+  'so_sanh',
   'don_hang',
   'khac',
 ] as const;
@@ -73,32 +80,37 @@ const INTENT_LABEL: Record<Intent, string> = {
   ky_thuat: '[intent=ky_thuat] Nhánh: Kỹ thuật canh tác lúa',
   trieu_chung: '[intent=trieu_chung] Nhánh: Chẩn đoán bệnh qua triệu chứng',
   san_pham: '[intent=san_pham] Nhánh: Tìm sản phẩm',
+  so_sanh: '[intent=so_sanh] Nhánh: So sánh / tư vấn chọn sản phẩm',
   don_hang: '[intent=don_hang] Nhánh: Đơn hàng / giỏ hàng',
   khac: '[intent=khac] Nhánh: Chào hỏi / ngoài phạm vi',
 };
 
-// Hướng dẫn Gemini phân loại câu hỏi vào đúng 1 trong 5 nhóm.
+// Hướng dẫn Gemini phân loại câu hỏi vào đúng 1 trong 6 nhóm.
 const CLASSIFY_INSTRUCTION = `Bạn là bộ phân loại ý định (intent) cho chatbot nông nghiệp TP Agri (chuyên về cây lúa).
 Nhiệm vụ: đọc cuộc hội thoại và phân loại TIN NHẮN MỚI NHẤT của người dùng vào ĐÚNG MỘT nhóm dưới đây.
 Dùng các tin nhắn trước đó làm ngữ cảnh khi tin mới nhất quá ngắn hoặc nối tiếp ý trước (vd "loại nào tốt hơn?", "vậy bón bao nhiêu?").
 
-Năm nhóm:
+Sáu nhóm:
 - ky_thuat: hỏi CÁCH LÀM / quy trình kỹ thuật canh tác lúa (làm đất, chọn giống, ngâm ủ, gieo sạ, bón phân, tưới/quản lý nước, làm cỏ, phòng trừ sâu bệnh nói chung, thu hoạch, bảo quản, mùa vụ, liều lượng/thời điểm...).
 - trieu_chung: người dùng MÔ TẢ dấu hiệu bất thường trên cây lúa và muốn biết ĐÓ LÀ BỆNH GÌ (vd "lá có đốm nâu", "cây bị vàng lá lụi dần", "thân thối nhũn"). Trọng tâm là CHẨN ĐOÁN, chưa hỏi mua.
 - san_pham: người dùng muốn TÌM/MUA sản phẩm cụ thể (thuốc, phân bón) — hỏi giá, công dụng, còn hàng, "có loại nào trị...", "tư vấn phân bón".
+- so_sanh: người dùng muốn SO SÁNH các sản phẩm với nhau hoặc hỏi NÊN CHỌN cái nào trong số các sản phẩm đã được gợi ý trước đó (vd "so sánh 2 loại này", "loại nào tốt hơn", "nên mua cái nào", "khác nhau chỗ nào"). Trọng tâm là LỰA CHỌN giữa các sản phẩm ĐÃ BIẾT, không phải tìm sản phẩm mới.
 - don_hang: hỏi về ĐƠN HÀNG hoặc GIỎ HÀNG của chính người dùng (trạng thái giao, đã mua gì, mã đơn, giỏ hàng).
 - khac: chào hỏi, cảm ơn, tạm biệt, xin gặp nhân viên, hoặc câu NGOÀI phạm vi cây lúa / dịch vụ TP Agri.
 
 Quy tắc ưu tiên khi câu CHỒNG nhiều nhóm (xét từ trên xuống, gặp điều kiện đúng trước thì chọn ngay):
 1. Nếu hỏi về đơn/giỏ hàng của bản thân → don_hang.
-2. Nếu có ý ĐỊNH MUA hoặc HỎI THUỐC/PHÂN cụ thể (kể cả khi có nhắc tên bệnh, vd "có thuốc nào trị đạo ôn") → san_pham.
-3. Nếu chỉ MÔ TẢ triệu chứng để nhờ đoán bệnh, CHƯA hỏi mua → trieu_chung.
-4. Nếu hỏi cách làm/quy trình kỹ thuật → ky_thuat.
-5. Còn lại → khac.
+2. Nếu SO SÁNH / hỏi NÊN CHỌN cái nào giữa các sản phẩm (thường nối tiếp sau khi đã gợi ý sản phẩm) → so_sanh.
+3. Nếu có ý ĐỊNH MUA hoặc HỎI THUỐC/PHÂN cụ thể (kể cả khi có nhắc tên bệnh, vd "có thuốc nào trị đạo ôn") → san_pham.
+4. Nếu chỉ MÔ TẢ triệu chứng để nhờ đoán bệnh, CHƯA hỏi mua → trieu_chung.
+5. Nếu hỏi cách làm/quy trình kỹ thuật → ky_thuat.
+6. Còn lại → khac.
 
 Phân biệt dễ nhầm:
 - "Lúa bị đốm nâu là bệnh gì?" → trieu_chung (nhờ đoán bệnh).
 - "Có thuốc nào trị đốm nâu không?" → san_pham (muốn mua thuốc).
+- "Trong các loại trên thì nên chọn cái nào?" → so_sanh (chọn giữa SP đã gợi ý).
+- "Loại nào tốt hơn?" / "So sánh giúp tôi 2 cái này" → so_sanh.
 - "Bón phân cho lúa giai đoạn đẻ nhánh thế nào?" → ky_thuat (hỏi cách làm), KHÔNG phải san_pham dù có chữ "phân".
 
 Ví dụ:
@@ -144,6 +156,32 @@ Yêu cầu:
 - Có thể nhắc người dùng bấm vào sản phẩm để xem chi tiết.
 - Văn phong tự nhiên, không JSON, không markdown phức tạp.`;
 
+// Hướng dẫn Gemini SO SÁNH các sản phẩm và tư vấn nên chọn cái nào (nhánh so_sanh).
+// Khác RECOMMEND_INSTRUCTION: ở đây ĐƯỢC PHÉP nêu tên/giá/thành phần để so sánh có
+// ý nghĩa, nhưng CHỈ dùng dữ liệu trong context, không bịa.
+const COMPARE_INSTRUCTION = `Bạn là trợ lý tư vấn của TP Agri (vật tư nông nghiệp cho cây lúa).
+Người dùng muốn SO SÁNH các sản phẩm dưới đây và muốn biết NÊN CHỌN loại nào.
+Bạn được cung cấp THÔNG TIN các sản phẩm (lấy từ cơ sở dữ liệu).
+Yêu cầu:
+- CHỈ dùng thông tin trong context được cung cấp; KHÔNG bịa thêm thông số, công dụng hay giá.
+- So sánh ngắn gọn theo các tiêu chí có dữ liệu: giá, thành phần/hoạt chất, công dụng/hướng dẫn dùng, đánh giá của người mua.
+- Đưa ra KHUYẾN NGHỊ nên chọn loại nào TÙY NHU CẦU (vd "nếu ưu tiên giá rẻ → ...", "nếu cần hiệu lực mạnh → ..."). TRÁNH khẳng định tuyệt đối một sản phẩm là "tốt nhất".
+- Được phép nhắc tên và giá sản phẩm trong câu trả lời để so sánh rõ ràng.
+- Nếu thông tin quá thiếu để so sánh, hãy nói thật và khuyên người dùng xem chi tiết từng sản phẩm hoặc liên hệ nhân viên.
+- Văn phong tự nhiên, thân thiện, tiếng Việt. Có thể dùng gạch đầu dòng. Tối đa khoảng 5-8 câu.`;
+
+// Hướng dẫn Gemini viết lại TIN NHẮN MỚI NHẤT thành câu hỏi ĐỘC LẬP (gộp ngữ
+// cảnh từ các tin trước) để khâu vector search không bị mù ngữ cảnh. Ví dụ sau
+// khi người dùng nói "lúa bị đạo ôn" rồi hỏi "loại nào tốt hơn?" → viết lại thành
+// "loại thuốc nào trị bệnh đạo ôn lúa tốt hơn?".
+const REWRITE_INSTRUCTION = `Bạn là bộ viết lại câu hỏi cho chatbot nông nghiệp TP Agri (cây lúa).
+Nhiệm vụ: dựa vào cuộc hội thoại, viết lại TIN NHẮN MỚI NHẤT của người dùng thành MỘT câu hỏi ĐỘC LẬP, đầy đủ ngữ cảnh, đứng một mình vẫn hiểu được.
+Quy tắc:
+- Bổ sung chủ thể/đối tượng bị lược (tên bệnh, tên sản phẩm, giai đoạn cây lúa...) lấy từ các tin trước.
+- GIỮ NGUYÊN ý định của người dùng, KHÔNG thêm thông tin mới ngoài hội thoại, KHÔNG trả lời câu hỏi.
+- Nếu tin mới nhất đã đầy đủ ngữ cảnh, trả lại gần như nguyên văn.
+- Viết bằng tiếng Việt, ngắn gọn, chỉ trả về ĐÚNG MỘT câu hỏi đã viết lại, không thêm giải thích.`;
+
 // Bỏ dấu tiếng Việt + viết thường để luật từ khóa bắt được cả câu không dấu.
 function normalize(text: string): string {
   return text
@@ -174,6 +212,24 @@ const KEYWORD_RULES: { intent: Intent; keywords: string[] }[] = [
       'tra cuu don',
       'theo doi don',
       'ma don',
+    ],
+  },
+  // so_sanh: so sánh / chọn lựa giữa các SP đã gợi ý. ĐỨNG TRƯỚC san_pham vì câu
+  // "loại nào tốt hơn" vừa nhắc SP vừa mang ý chọn → ưu tiên so_sanh.
+  {
+    intent: 'so_sanh',
+    keywords: [
+      'so sanh',
+      'loai nao tot hon',
+      'cai nao tot hon',
+      'loai nao tot',
+      'cai nao tot',
+      'nen chon',
+      'nen mua cai nao',
+      'nen mua loai nao',
+      'chon cai nao',
+      'chon loai nao',
+      'khac nhau',
     ],
   },
   // san_pham: có ý định mua / hỏi giá → thắng triệu chứng nếu cùng xuất hiện.
@@ -295,6 +351,7 @@ export class ChatbotService {
     private readonly configService: ConfigService,
     private readonly embeddingService: EmbeddingService,
     private readonly techniquesService: TechniquesService,
+    private readonly diseasePredictionService: DiseasePredictionService,
     @InjectRepository(Disease)
     private readonly diseasesRepository: MongoRepository<Disease>,
     @InjectRepository(Product)
@@ -313,7 +370,10 @@ export class ChatbotService {
    * Phân loại intent rồi trả về thông báo debug cho biết đã vào nhánh nào.
    * Bước này CHƯA xử lý nhánh thật — chỉ để test khả năng phân loại đầu vào.
    */
-  async chat(messages: ChatMessageDto[]): Promise<ChatResult> {
+  async chat(
+    messages: ChatMessageDto[],
+    comparedProductIds?: string[],
+  ): Promise<ChatResult> {
     if (!this.ai) {
       throw new ServiceUnavailableException(
         'Chatbot chưa được cấu hình (thiếu GEMINI_API_KEY)',
@@ -325,10 +385,19 @@ export class ChatbotService {
       .reverse()
       .find((m) => m.role === 'user')?.content;
 
+    // Câu dùng cho khâu truy hồi (vector search). Mặc định là tin cuối, nhưng nếu
+    // hội thoại có ngữ cảnh trước đó thì viết lại thành câu ĐỘC LẬP (gộp ngữ cảnh)
+    // để embedding không bị mù ngữ cảnh với câu nối tiếp ("loại nào tốt hơn?").
+    const retrievalText = await this.buildRetrievalText(messages, lastUser);
+
     // Lớp 1: luật từ khóa — câu rõ ràng được gán intent ngay, không tốn request Gemini.
     const ruleIntent = lastUser ? this.ruleClassify(lastUser) : null;
     if (ruleIntent) {
-      const branch = await this.runIntentBranch(ruleIntent, lastUser);
+      const branch = await this.runIntentBranch(
+        ruleIntent,
+        retrievalText,
+        comparedProductIds,
+      );
       return {
         // 0.9 (không phải 1): luật từ khóa nhanh nhưng không hoàn hảo bằng Gemini,
         // tránh báo "chắc chắn tuyệt đối" cho trường hợp keyword khớp nhầm.
@@ -347,7 +416,11 @@ export class ChatbotService {
     const { intent, confidence, reason, source } =
       await this.classifyIntent(messages);
 
-    const branch = await this.runIntentBranch(intent, lastUser);
+    const branch = await this.runIntentBranch(
+      intent,
+      retrievalText,
+      comparedProductIds,
+    );
     return {
       intent,
       confidence,
@@ -361,21 +434,166 @@ export class ChatbotService {
   }
 
   /**
+   * Dự đoán bệnh từ ẢNH người dùng gửi trong chatbot.
+   * Khác nhánh trieu_chung (mô tả bằng chữ → vector search): nhánh này forward ảnh
+   * sang ml-service (model AI) qua DiseasePredictionService, KHÔNG gọi Gemini diễn
+   * đạt — reply lấy thẳng từ dữ liệu bệnh trong DB.
+   *
+   * Trả về cùng shape ChatResult với nhánh text để FE render chung
+   * (thẻ chẩn đoán + thẻ thuốc gợi ý).
+   */
+  async predictImage(file: Express.Multer.File): Promise<ChatResult> {
+    // predict() forward ảnh sang ml-service rồi map slug → Disease (kèm thuốc).
+    const result = await this.diseasePredictionService.predict(file);
+    const top = result.top;
+
+    // Model luôn trả top-1 kể cả ảnh không phải lá lúa → dưới ngưỡng (hoặc DB chưa
+    // có bệnh tương ứng) thì trả lời an toàn, không khẳng định bệnh.
+    if (!top || !top.disease || top.confidence < IMAGE_CONF_MIN) {
+      return {
+        intent: 'trieu_chung',
+        confidence: top?.confidence ?? 0,
+        reason: 'Ảnh không đủ tin cậy để chẩn đoán',
+        reply:
+          'Mình chưa nhận diện chắc chắn bệnh từ ảnh này. Bạn thử chụp rõ hơn vết ' +
+          'bệnh trên lá/thân lúa (đủ sáng, cận cảnh), hoặc bấm "Liên hệ nhân viên" ' +
+          'để được hỗ trợ trực tiếp nhé.',
+        source: 'rule',
+      };
+    }
+
+    const disease = top.disease;
+
+    // Thẻ chẩn đoán dùng confidence THẬT của model (0..1) → %, khác buildDiagnosis
+    // (map từ cosine score của vector search ở nhánh text).
+    const diagnosis = this.buildDiagnosisFromConfidence(
+      disease.name,
+      top.confidence,
+    );
+
+    // Thuốc gợi ý — tái dùng helper của nhánh text.
+    const products = await this.loadRecommendedProducts(
+      disease.recommendedProductIds ?? [],
+    );
+
+    // Reply lấy thẳng từ DB (không Gemini). Thuốc render thành thẻ riêng ở FE nên
+    // không liệt kê tên/giá trong text.
+    const intro = `Theo ảnh bạn gửi, nhiều khả năng cây lúa bị **${disease.name}**.`;
+    const desc = disease.description ? `\n${disease.description}` : '';
+    const meds = products.length
+      ? '\n\nBạn tham khảo các sản phẩm gợi ý bên dưới nhé.'
+      : '';
+
+    return {
+      intent: 'trieu_chung',
+      confidence: top.confidence,
+      reason: 'Chẩn đoán từ ảnh',
+      reply: `${intro}${desc}${meds}`,
+      source: 'rule',
+      diagnosis,
+      products: this.toProductCards(products),
+    };
+  }
+
+  /**
+   * Ánh xạ confidence (0..1) của model ảnh sang thẻ chẩn đoán cho FE.
+   * Khác buildDiagnosis (nhận cosine score): ở đây confidence đã là xác suất nên
+   * dùng trực tiếp → %, và phân mức theo các mốc 0.8 / 0.6.
+   */
+  private buildDiagnosisFromConfidence(
+    disease: string,
+    confidence: number,
+  ): Diagnosis {
+    const pct = Math.round(Math.min(1, Math.max(0, confidence)) * 100);
+
+    let level: DiagnosisLevel;
+    if (confidence >= 0.8) level = 'cao';
+    else if (confidence >= 0.6) level = 'trung_binh';
+    else level = 'thap';
+
+    return { disease, confidence: pct, level };
+  }
+
+  /**
+   * Tạo câu dùng cho khâu truy hồi (vector search). Nếu hội thoại chỉ có một tin
+   * người dùng (không có ngữ cảnh trước) thì dùng nguyên tin cuối — khỏi tốn
+   * request Gemini. Nếu có ngữ cảnh trước đó, nhờ Gemini viết lại thành câu độc
+   * lập để embedding không mất ngữ cảnh với câu nối tiếp ("loại nào tốt hơn?").
+   */
+  private async buildRetrievalText(
+    messages: ChatMessageDto[],
+    lastUser: string | undefined,
+  ): Promise<string | undefined> {
+    if (!lastUser) return undefined;
+
+    // Chỉ viết lại khi có ít nhất một tin TRƯỚC tin cuối làm ngữ cảnh.
+    const hasPriorContext = messages.length > 1;
+    if (!hasPriorContext) return lastUser;
+
+    return this.rewriteStandaloneQuery(messages, lastUser);
+  }
+
+  /**
+   * Gemini viết lại tin nhắn mới nhất thành câu hỏi độc lập (gộp ngữ cảnh hội
+   * thoại). Trả về câu gốc nếu Gemini lỗi/rỗng để không chặn luồng truy hồi.
+   */
+  private async rewriteStandaloneQuery(
+    messages: ChatMessageDto[],
+    lastUser: string,
+  ): Promise<string> {
+    const contents = messages.map((m) => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    }));
+
+    try {
+      const response = await this.ai!.models.generateContent({
+        model: MODEL,
+        contents,
+        config: {
+          systemInstruction: REWRITE_INSTRUCTION,
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+      });
+
+      const rewritten = (response.text ?? '').trim();
+      // Phòng Gemini trả rỗng hoặc lỡ trả nguyên cả đoạn dài bất thường → giữ câu gốc.
+      if (rewritten && rewritten.length <= 4000) return rewritten;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Viết lại câu hỏi độc lập thất bại: ${msg}`);
+    }
+
+    return lastUser;
+  }
+
+  /**
    * Thực thi nhánh xử lý theo intent. Trả về phần dữ liệu để ghép vào ChatResult.
    * Nhánh chưa triển khai (ky_thuat, don_hang, khac) trả {} → dùng INTENT_LABEL.
    */
   private async runIntentBranch(
     intent: Intent,
-    lastUser: string | undefined,
+    retrievalText: string | undefined,
+    comparedProductIds?: string[],
   ): Promise<{
     reply?: string;
     products?: ChatProduct[];
     diagnosis?: Diagnosis;
     sources?: string[];
   }> {
-    if (!lastUser) return {};
+    // Nhánh khac (chào hỏi / ngoài phạm vi) không cần truy hồi → câu trả lời cố định.
+    if (intent === 'khac') {
+      return { reply: this.khacReply() };
+    }
+    // Nhánh so_sanh: ưu tiên SP do FE gửi kèm (comparedProductIds); nếu rỗng thì
+    // fallback tìm theo câu hỏi. Xử lý trước check retrievalText vì dựa vào ids.
+    if (intent === 'so_sanh') {
+      const res = await this.handleSoSanh(retrievalText, comparedProductIds);
+      return { reply: res.reply, products: res.products };
+    }
+    if (!retrievalText) return {};
     if (intent === 'trieu_chung') {
-      const diag = await this.handleTrieuChung(lastUser);
+      const diag = await this.handleTrieuChung(retrievalText);
       return {
         reply: diag.reply,
         products: diag.products,
@@ -383,14 +601,28 @@ export class ChatbotService {
       };
     }
     if (intent === 'san_pham') {
-      const res = await this.handleSanPham(lastUser);
+      const res = await this.handleSanPham(retrievalText);
       return { reply: res.reply, products: res.products };
     }
     if (intent === 'ky_thuat') {
-      const res = await this.handleKyThuat(lastUser);
+      const res = await this.handleKyThuat(retrievalText);
       return { reply: res.reply, sources: res.sources };
     }
     return {};
+  }
+
+  /**
+   * Câu trả lời cố định cho nhánh khac: vừa đáp lại chào hỏi/cảm ơn, vừa nhắc lại
+   * phạm vi hỗ trợ để hướng người dùng về đúng chủ đề cây lúa (không gọi Gemini).
+   */
+  private khacReply(): string {
+    return (
+      'Mình là trợ lý ảo của TP Agri 🌾, chuyên hỗ trợ về cây lúa. Mình có thể giúp bạn:\n' +
+      '• Chẩn đoán bệnh lúa (mô tả triệu chứng hoặc gửi ảnh lá lúa)\n' +
+      '• Tư vấn thuốc & phân bón phù hợp\n' +
+      '• Giải đáp kỹ thuật canh tác lúa\n' +
+      'Bạn cứ đặt câu hỏi, hoặc bấm "Liên hệ nhân viên" nếu cần hỗ trợ trực tiếp nhé!'
+    );
   }
 
   /* ─────────────────────────────────────────
@@ -842,6 +1074,104 @@ ${medsHint}`;
     }
 
     return 'Mình tìm được một vài sản phẩm phù hợp, bạn tham khảo các gợi ý bên dưới nhé. Bấm vào sản phẩm để xem chi tiết.';
+  }
+
+  /* ─────────────────────────────────────────
+     Nhánh so_sanh — so sánh & tư vấn chọn sản phẩm
+     Nguồn SP: comparedProductIds do FE gửi kèm (các SP đang hiển thị). Nếu rỗng →
+     fallback vector search theo câu hỏi. Generation: Gemini viết đoạn so sánh +
+     khuyến nghị (được phép nêu tên/giá để so sánh có ý nghĩa).
+  ───────────────────────────────────────── */
+
+  /**
+   * So sánh các sản phẩm và tư vấn nên chọn loại nào.
+   * 1) Lấy SP cần so sánh (ưu tiên ids FE gửi, fallback vector search) →
+   * 2) Gemini viết đoạn so sánh từ dữ liệu SP → 3) trả kèm thẻ SP để bấm xem chi tiết.
+   */
+  private async handleSoSanh(
+    userText: string | undefined,
+    comparedProductIds?: string[],
+  ): Promise<{ reply: string; products: ChatProduct[] }> {
+    // Ưu tiên SP do FE gửi (đúng các SP người dùng đang nhìn). Nếu không có thì
+    // thử tìm theo câu hỏi để vẫn so sánh được khi thiếu context.
+    let products = await this.loadRecommendedProducts(comparedProductIds ?? []);
+    if (products.length < 2 && userText) {
+      products = await this.findBestProducts(userText, PRODUCT_LIMIT);
+    }
+
+    // Cần ít nhất 2 SP mới so sánh được.
+    if (products.length < 2) {
+      return {
+        reply:
+          'Mình cần ít nhất 2 sản phẩm để so sánh giúp bạn. Bạn thử hỏi tư vấn sản ' +
+          'phẩm trước (vd "thuốc trị đạo ôn"), rồi nhờ mình so sánh các loại gợi ý nhé.',
+        products: this.toProductCards(products),
+      };
+    }
+
+    const reply = await this.composeCompareReply(userText ?? '', products);
+    return { reply, products: this.toProductCards(products) };
+  }
+
+  /**
+   * Gemini viết đoạn so sánh + khuyến nghị từ thông tin các SP. Khác
+   * composeRecommendReply: ĐƯỢC PHÉP nêu tên/giá/thành phần để so sánh.
+   * Context chỉ gồm dữ liệu SP từ DB; fallback câu cố định nếu Gemini lỗi/rỗng.
+   */
+  private async composeCompareReply(
+    userText: string,
+    products: Product[],
+  ): Promise<string> {
+    // Liệt kê từng SP với các tiêu chí có dữ liệu để Gemini so sánh.
+    const context = products
+      .map((p, i) => {
+        const price = p.salePrice ?? p.price;
+        const lines = [
+          `${i + 1}. ${p.name}`,
+          `   - Giá: ${price.toLocaleString('vi-VN')}đ${
+            p.salePrice != null ? ` (giảm từ ${p.price.toLocaleString('vi-VN')}đ)` : ''
+          }`,
+        ];
+        if (p.ingredients) lines.push(`   - Thành phần/hoạt chất: ${p.ingredients}`);
+        if (p.usageInstructions)
+          lines.push(`   - Hướng dẫn dùng: ${p.usageInstructions}`);
+        if (p.description) lines.push(`   - Mô tả: ${p.description}`);
+        if (p.reviewCount > 0)
+          lines.push(
+            `   - Đánh giá: ${p.averageRating.toFixed(1)}/5 (${p.reviewCount} lượt)`,
+          );
+        else lines.push('   - Đánh giá: chưa có');
+        return lines.join('\n');
+      })
+      .join('\n\n');
+
+    try {
+      const response = await this.ai!.models.generateContent({
+        model: MODEL,
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: `Người dùng hỏi: "${userText}"\n\nCÁC SẢN PHẨM CẦN SO SÁNH (chỉ dùng dữ liệu này):\n${context}`,
+              },
+            ],
+          },
+        ],
+        config: {
+          systemInstruction: COMPARE_INSTRUCTION,
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+      });
+
+      const reply = (response.text ?? '').trim();
+      if (reply) return reply;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Diễn đạt so sánh SP thất bại: ${msg}`);
+    }
+
+    return 'Mình đã liệt kê các sản phẩm để bạn so sánh bên dưới. Bạn bấm vào từng sản phẩm để xem chi tiết, hoặc cho mình biết bạn ưu tiên tiêu chí nào (giá, hiệu lực, đánh giá) để mình tư vấn rõ hơn nhé.';
   }
 
   /**

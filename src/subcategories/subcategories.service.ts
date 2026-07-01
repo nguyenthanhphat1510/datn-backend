@@ -46,6 +46,11 @@ export class SubcategoriesService {
     if (!category) {
       throw new NotFoundException(`Không tìm thấy danh mục cha với ID: ${categoryId}`);
     }
+    if (!category.isActive) {
+      throw new BadRequestException(
+        'Danh mục cha đang bị ẩn, hãy khôi phục danh mục cha trước',
+      );
+    }
   }
 
   async create(dto: CreateSubcategoryDto): Promise<Subcategory> {

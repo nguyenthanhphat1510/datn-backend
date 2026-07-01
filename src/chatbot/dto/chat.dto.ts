@@ -4,7 +4,9 @@ import {
   ArrayNotEmpty,
   IsArray,
   IsIn,
+  IsMongoId,
   IsNotEmpty,
+  IsOptional,
   IsString,
   MaxLength,
   ValidateNested,
@@ -45,4 +47,17 @@ export class ChatDto {
   @ValidateNested({ each: true })
   @Type(() => ChatMessageDto)
   messages: ChatMessageDto[];
+
+  @ApiProperty({
+    type: [String],
+    required: false,
+    description:
+      'ID các sản phẩm đang hiển thị mà FE gửi kèm để bot SO SÁNH (nhánh so_sanh). Bỏ trống nếu không có.',
+    example: ['665f1a2b3c4d5e6f7a8b9c0d'],
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10, { message: 'comparedProductIds tối đa 10 sản phẩm' })
+  @IsMongoId({ each: true, message: 'comparedProductIds phải là danh sách ID hợp lệ' })
+  comparedProductIds?: string[];
 }
